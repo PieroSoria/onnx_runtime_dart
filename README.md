@@ -21,7 +21,7 @@ exactly what is covered.
 Standard ONNX transformer support, pre-load auditing, execution controls and
 portable asynchronous loading are documented in
 [Transformer runtime](docs/transformer_runtime.md), including current precision
-and KV-cache limitations. A Gemma export is not yet an end-to-end verified model.
+and KV-cache limitations.
 
 Every model below is run **against native ONNX Runtime** (`onnxruntime`, CPU
 provider) on deterministic inputs and checked op-for-op; the "parity" column
@@ -81,12 +81,16 @@ linked).
 |---|---|---|---|
 | SmolLM2-135M-Instruct | `HuggingFaceTB/SmolLM2-135M-Instruct` (ONNX export) | Llama-style decoder; 30× fused **`GroupQueryAttention`** with real **`past`/`present` KV cache** (9 query / 3 KV heads), external `RotaryEmbedding` | prefill + decode 1.0 on `logits` **and** `present.*`; 24-step greedy generation token-for-token identical to ORT |
 | Qwen2.5-0.5B-Instruct | `onnx-community/Qwen2.5-0.5B-Instruct` (fp16) | **fully decomposed** decoder (no fused ops — RoPE / attention as primitives, 24 layers, 2 KV heads); **graph-level KV cache** via `Concat`/`Slice` | prefill logits cosine 0.99999885, decode 0.99999976 (fp16 band); coherent text generation |
+| Gemma 4 E2B `†` | local export (3 graphs: `vision_encoder` / `embedding` / `decoder`, fp16, opset 24) | fused **`GroupQueryAttention`** decoder with **persistent KV cache** (`enablePersistentKv()`, resident rows keep causal+window semantics); `per_layer_inputs` 8960-feature regula- rization (VisionGemma); whole-VGG vision encoder; 258880-feature embedding constants | real image → text: generated tokens `[106, 107, 1]` identical to native ORT; step-0 `logits` cosine 0.999; `inputs_embeds` 0.996; pooled `image_features` cosine 0.924 (fp16 attention curve); ~2.85 GB host RSS, ~11 s/step |
 
 Full autoregressive text generation runs in pure Dart — both the fused-`GroupQueryAttention`
 export style and the fully-decomposed one — with `present_key`/`present_value`
 feeding straight back as the next step's `past_key`/`past_value`.
 `OnnxModel.inputSpecs` reports the decoder's cache shape (layers / KV heads /
-head size) so the empty first-step past can be sized generically. `tool/llm_chat.dart`
+head size) so the empty first-step past can be sized generically. Multimodal
+decoders that fuse the KV cache into a single resident buffer use
+`enablePersistentKv()` (no `past` inputs; Attention opsets 23-25, including
+`left/right_window_size` sliding windows). `tool/llm_chat.dart`
 is a complete **text-in / text-out** demo (byte-level BPE tokenizer loaded
 from `tokenizer.json`, ChatML prompt, greedy + temperature/top-k sampling);
 `tool/smollm2_generate.dart` is a greedy loop checked token-for-token against ORT.
