@@ -1,0 +1,65 @@
+[
+  {
+    "inputs_embeds": {
+      "maxAbs": 0.0,
+      "rmse": 0.0,
+      "cosine": 1.0
+    },
+    "per_layer_inputs": {
+      "maxAbs": 0.015625,
+      "rmse": 0.00047614840944427755,
+      "cosine": 0.9999998853927515
+    },
+    "logits": {
+      "maxAbs": 0.046875,
+      "rmse": 0.021955939231894,
+      "cosine": 0.999999844071093
+    },
+    "token": 9259,
+    "expectedToken": 9259,
+    "seconds": 17.651,
+    "rss": 1807437824
+  },
+  {
+    "inputs_embeds": {
+      "maxAbs": 0.0,
+      "rmse": 0.0,
+      "cosine": 1.0
+    },
+    "per_layer_inputs": {
+      "maxAbs": 0.015625,
+      "rmse": 0.00047614840944427755,
+      "cosine": 0.9999998853927515
+    },
+    "logits": {
+      "maxAbs": 0.046875,
+      "rmse": 0.021955939231894,
+      "cosine": 0.999999844071093
+    },
+    "token": 9259,
+    "expectedToken": 9259,
+    "seconds": 17.558,
+    "rss": 1822674944
+  },
+  {
+    "inputs_embeds": {
+      "maxAbs": 0.0,
+      "rmse": 0.0,
+      "cosine": 1.0
+    },
+    "per_layer_inputs": {
+      "maxAbs": 0.015625,
+      "rmse": 0.00047614840944427755,
+      "cosine": 0.9999998853927515
+    },
+    "logits": {
+      "maxAbs": 0.03125,
+      "rmse": 0.009621482984355157,
+      "cosine": 0.9999998590721528
+    },
+    "token": 9259,
+    "expectedToken": 9259,
+    "seconds": 17.447,
+    "rss": 1841307648
+  }
+]

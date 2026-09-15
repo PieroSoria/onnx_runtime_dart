@@ -1,0 +1,82 @@
+{
+  "grid": 4,
+  "shape": [
+    1,
+    1536
+  ],
+  "maxAbs": 0.863037109375,
+  "rmse": 0.22631985421042758,
+  "cosine": 0.9684780412348657,
+  "seconds": 0.918,
+  "rss": 1044508672,
+  "probes": {
+    "v_vision_encoder.encoder.layers.5.self_attn.q_norm.RMSNormalization_565": {
+      "maxAbs": 0.001953125,
+      "cosine": 0.999999782205446
+    },
+    "v_vision_encoder.encoder.layers.5.self_attn.k_norm.RMSNormalization_566": {
+      "maxAbs": 0.005859375,
+      "cosine": 0.9999998428687452
+    },
+    "v_vision_encoder.encoder.layers.5.self_attn.v_norm.RMSNormalization_568": {
+      "maxAbs": 0.00390625,
+      "cosine": 0.999999632413439
+    },
+    "v_vision_encoder.encoder.layers.5.post_attention_layernorm.RMSNormalization_633": {
+      "maxAbs": 0.03515625,
+      "cosine": 0.9999991415075146
+    },
+    "v_vision_encoder.encoder.layers.5.post_feedforward_layernorm.RMSNormalization_650": {
+      "maxAbs": 0.125,
+      "cosine": 0.9999999196287243
+    },
+    "v_vision_encoder.encoder.layers.10.self_attn.q_norm.RMSNormalization_1080": {
+      "maxAbs": 0.0029296875,
+      "cosine": 0.9999989661914417
+    },
+    "v_vision_encoder.encoder.layers.10.self_attn.k_norm.RMSNormalization_1081": {
+      "maxAbs": 0.01171875,
+      "cosine": 0.9999994180667646
+    },
+    "v_vision_encoder.encoder.layers.10.self_attn.v_norm.RMSNormalization_1083": {
+      "maxAbs": 0.01025390625,
+      "cosine": 0.9999979536770811
+    },
+    "v_vision_encoder.encoder.layers.10.post_attention_layernorm.RMSNormalization_1148": {
+      "maxAbs": 0.03515625,
+      "cosine": 0.9999978344894659
+    },
+    "v_vision_encoder.encoder.layers.10.post_feedforward_layernorm.RMSNormalization_1165": {
+      "maxAbs": 0.125,
+      "cosine": 0.9999979685048229
+    },
+    "v_vision_encoder.encoder.layers.14.self_attn.q_norm.RMSNormalization_1492": {
+      "maxAbs": 0.0078125,
+      "cosine": 0.99999516483622
+    },
+    "v_vision_encoder.encoder.layers.14.self_attn.k_norm.RMSNormalization_1493": {
+      "maxAbs": 0.0234375,
+      "cosine": 0.9999976075223785
+    },
+    "v_vision_encoder.encoder.layers.14.self_attn.v_norm.RMSNormalization_1495": {
+      "maxAbs": 0.04754638671875,
+      "cosine": 0.9999886736028931
+    },
+    "v_vision_encoder.encoder.layers.14.post_attention_layernorm.RMSNormalization_1560": {
+      "maxAbs": 0.6640625,
+      "cosine": 0.9999898275706147
+    },
+    "v_vision_encoder.encoder.layers.14.post_feedforward_layernorm.RMSNormalization_1577": {
+      "maxAbs": 0.625,
+      "cosine": 0.9999745072326186
+    },
+    "v_vision_encoder.pooler.MatMul_1725": {
+      "maxAbs": 557.0,
+      "cosine": 0.9838598170492666
+    },
+    "v_vision_encoder.pooler.Mul_1728": {
+      "maxAbs": 15424.0,
+      "cosine": 0.9838576572803082
+    }
+  }
+}

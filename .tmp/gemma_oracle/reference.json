@@ -1,0 +1,122 @@
+{
+  "ort": "1.29.0",
+  "steps": [
+    {
+      "ids": [
+        [
+          9259
+        ]
+      ],
+      "embedding": {
+        "inputs_embeds": {
+          "file": "0-embed-inputs_embeds.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            1536
+          ]
+        },
+        "per_layer_inputs": {
+          "file": "0-embed-per_layer_inputs.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            8960
+          ]
+        }
+      },
+      "logits": {
+        "file": "0-logits.bin",
+        "dtype": "float32",
+        "shape": [
+          1,
+          1,
+          262144
+        ]
+      },
+      "token": 9259
+    },
+    {
+      "ids": [
+        [
+          9259
+        ]
+      ],
+      "embedding": {
+        "inputs_embeds": {
+          "file": "1-embed-inputs_embeds.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            1536
+          ]
+        },
+        "per_layer_inputs": {
+          "file": "1-embed-per_layer_inputs.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            8960
+          ]
+        }
+      },
+      "logits": {
+        "file": "1-logits.bin",
+        "dtype": "float32",
+        "shape": [
+          1,
+          1,
+          262144
+        ]
+      },
+      "token": 9259
+    },
+    {
+      "ids": [
+        [
+          9259
+        ]
+      ],
+      "embedding": {
+        "inputs_embeds": {
+          "file": "2-embed-inputs_embeds.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            1536
+          ]
+        },
+        "per_layer_inputs": {
+          "file": "2-embed-per_layer_inputs.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            8960
+          ]
+        }
+      },
+      "logits": {
+        "file": "2-logits.bin",
+        "dtype": "float32",
+        "shape": [
+          1,
+          1,
+          262144
+        ]
+      },
+      "token": 9259
+    }
+  ],
+  "generated": [
+    9259,
+    9259,
+    9259
+  ],
+  "text": "HelloHelloHello"
+}

@@ -1,0 +1,90 @@
+{
+  "image_features": {
+    "maxAbs": 1.230224609375,
+    "rmse": 0.32641976673329637,
+    "cosine": 0.9240818008022585
+  },
+  "steps": [
+    {
+      "embedding": {
+        "inputs_embeds": {
+          "maxAbs": 1.230224609375,
+          "rmse": 0.10322299361780767,
+          "cosine": 0.995907173444774
+        },
+        "per_layer_inputs": {
+          "maxAbs": 3.2265625,
+          "rmse": 0.07206757442005333,
+          "cosine": 0.998037759651743
+        }
+      },
+      "logits": {
+        "maxAbs": 5.3671875,
+        "rmse": 0.468952950838794,
+        "cosine": 0.998998243470569
+      },
+      "token": 106,
+      "expectedToken": 106,
+      "seconds": 18.018,
+      "rss": 2834128896
+    },
+    {
+      "embedding": {
+        "inputs_embeds": {
+          "maxAbs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0
+        },
+        "per_layer_inputs": {
+          "maxAbs": 0.015625,
+          "rmse": 0.000598446435988041,
+          "cosine": 0.9999998393993543
+        }
+      },
+      "logits": {
+        "maxAbs": 0.421875,
+        "rmse": 0.045343699715218046,
+        "cosine": 0.9999991856896415
+      },
+      "token": 107,
+      "expectedToken": 107,
+      "seconds": 10.839,
+      "rss": 2846572544
+    },
+    {
+      "embedding": {
+        "inputs_embeds": {
+          "maxAbs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0
+        },
+        "per_layer_inputs": {
+          "maxAbs": 0.03125,
+          "rmse": 0.0008091430450466425,
+          "cosine": 0.9999997929605713
+        }
+      },
+      "logits": {
+        "maxAbs": 0.59375,
+        "rmse": 0.13567334940751816,
+        "cosine": 0.999996022990204
+      },
+      "token": 1,
+      "expectedToken": 1,
+      "seconds": 11.053,
+      "rss": 2856919040
+    }
+  ],
+  "generated": [
+    106,
+    107,
+    1
+  ],
+  "expected": [
+    106,
+    107,
+    1
+  ],
+  "seconds": 40.897,
+  "rss": 2856919040
+}

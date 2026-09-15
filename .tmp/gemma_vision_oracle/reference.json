@@ -1,0 +1,176 @@
+{
+  "ort": "1.29.0",
+  "grid": 4,
+  "outputs": {
+    "image_features": {
+      "file": "vision-image_features.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        1536
+      ]
+    },
+    "v_vision_encoder.encoder.layers.5.self_attn.q_norm.RMSNormalization_565": {
+      "file": "vision-probe_out_0.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.5.self_attn.k_norm.RMSNormalization_566": {
+      "file": "vision-probe_out_1.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.5.self_attn.v_norm.RMSNormalization_568": {
+      "file": "vision-probe_out_2.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.5.post_attention_layernorm.RMSNormalization_633": {
+      "file": "vision-probe_out_3.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        768
+      ]
+    },
+    "v_vision_encoder.encoder.layers.5.post_feedforward_layernorm.RMSNormalization_650": {
+      "file": "vision-probe_out_4.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        768
+      ]
+    },
+    "v_vision_encoder.encoder.layers.10.self_attn.q_norm.RMSNormalization_1080": {
+      "file": "vision-probe_out_5.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.10.self_attn.k_norm.RMSNormalization_1081": {
+      "file": "vision-probe_out_6.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.10.self_attn.v_norm.RMSNormalization_1083": {
+      "file": "vision-probe_out_7.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.10.post_attention_layernorm.RMSNormalization_1148": {
+      "file": "vision-probe_out_8.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        768
+      ]
+    },
+    "v_vision_encoder.encoder.layers.10.post_feedforward_layernorm.RMSNormalization_1165": {
+      "file": "vision-probe_out_9.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        768
+      ]
+    },
+    "v_vision_encoder.encoder.layers.14.self_attn.q_norm.RMSNormalization_1492": {
+      "file": "vision-probe_out_10.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.14.self_attn.k_norm.RMSNormalization_1493": {
+      "file": "vision-probe_out_11.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.14.self_attn.v_norm.RMSNormalization_1495": {
+      "file": "vision-probe_out_12.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        12,
+        64
+      ]
+    },
+    "v_vision_encoder.encoder.layers.14.post_attention_layernorm.RMSNormalization_1560": {
+      "file": "vision-probe_out_13.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        768
+      ]
+    },
+    "v_vision_encoder.encoder.layers.14.post_feedforward_layernorm.RMSNormalization_1577": {
+      "file": "vision-probe_out_14.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        16,
+        768
+      ]
+    },
+    "v_vision_encoder.pooler.MatMul_1725": {
+      "file": "vision-probe_out_15.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        1,
+        768
+      ]
+    },
+    "v_vision_encoder.pooler.Mul_1728": {
+      "file": "vision-probe_out_16.bin",
+      "dtype": "float32",
+      "shape": [
+        1,
+        1,
+        768
+      ]
+    }
+  }
+}

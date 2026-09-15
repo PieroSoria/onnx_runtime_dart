@@ -1,0 +1,160 @@
+{
+  "ort": "1.29.0",
+  "grid": 4,
+  "prompt": "Describe this image in detail.",
+  "image": "test.webp",
+  "image-features": {
+    "file": "image-features.bin",
+    "dtype": "float32",
+    "shape": [
+      1,
+      1536
+    ]
+  },
+  "pixel-values": {
+    "file": "pixel-values.bin",
+    "dtype": "float16",
+    "shape": [
+      1,
+      16,
+      768
+    ]
+  },
+  "pixel-position-ids": {
+    "file": "pixel-position-ids.bin",
+    "dtype": "int64",
+    "shape": [
+      1,
+      16,
+      2
+    ]
+  },
+  "steps": [
+    {
+      "ids": [
+        [
+          2,
+          258880,
+          258882,
+          82858,
+          672,
+          2471,
+          528,
+          8052,
+          236761,
+          1
+        ]
+      ],
+      "embedding": {
+        "inputs_embeds": {
+          "file": "0-embed-inputs_embeds.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            10,
+            1536
+          ]
+        },
+        "per_layer_inputs": {
+          "file": "0-embed-per_layer_inputs.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            10,
+            8960
+          ]
+        }
+      },
+      "logits": {
+        "file": "0-logits.bin",
+        "dtype": "float32",
+        "shape": [
+          1,
+          10,
+          262144
+        ]
+      },
+      "token": 106
+    },
+    {
+      "ids": [
+        [
+          106
+        ]
+      ],
+      "embedding": {
+        "inputs_embeds": {
+          "file": "1-embed-inputs_embeds.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            1536
+          ]
+        },
+        "per_layer_inputs": {
+          "file": "1-embed-per_layer_inputs.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            8960
+          ]
+        }
+      },
+      "logits": {
+        "file": "1-logits.bin",
+        "dtype": "float32",
+        "shape": [
+          1,
+          1,
+          262144
+        ]
+      },
+      "token": 107
+    },
+    {
+      "ids": [
+        [
+          107
+        ]
+      ],
+      "embedding": {
+        "inputs_embeds": {
+          "file": "2-embed-inputs_embeds.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            1536
+          ]
+        },
+        "per_layer_inputs": {
+          "file": "2-embed-per_layer_inputs.bin",
+          "dtype": "float32",
+          "shape": [
+            1,
+            1,
+            8960
+          ]
+        }
+      },
+      "logits": {
+        "file": "2-logits.bin",
+        "dtype": "float32",
+        "shape": [
+          1,
+          1,
+          262144
+        ]
+      },
+      "token": 1
+    }
+  ],
+  "generated": [
+    106,
+    107,
+    1
+  ],
+  "text": "\n"
+}
