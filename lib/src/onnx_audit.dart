@@ -29,6 +29,14 @@ Map<String, dynamic>? resolveOnnxSchema(
   return selected;
 }
 
+/// Attributes whose semantic value the graph compiler derives from tensor
+/// shapes (and re-validates against the declared value itself) instead of the
+/// kernel consuming them. The metadata schema lists them without a default,
+/// so the audit must not flag them as unhandled when present.
+const Set<String> derivedAttributes = {
+  'kernel_shape', // Conv/ConvTranspose: reconstructed from the weight shape.
+};
+
 class OnnxCompatibilityIssue {
   final String path;
   final String message;
@@ -213,7 +221,8 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
             issue(np, 'Wrong type for attribute "${a.name}"');
           }
           if (spec != null &&
-              !(schema['handledAttributes'] as List).contains(a.name)) {
+              !(schema['handledAttributes'] as List).contains(a.name) &&
+              !derivedAttributes.contains(a.name)) {
             final Object? value = switch (spec[0]) {
               1 => a.f,
               2 => a.i.toInt(),

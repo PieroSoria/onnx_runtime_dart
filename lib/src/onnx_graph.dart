@@ -1,6 +1,6 @@
-/// Executes a parsed ONNX graph node-by-node. ONNX graphs are required by
+﻿/// Executes a parsed ONNX graph node-by-node. ONNX graphs are required by
 /// the spec to be in topological order already, so this is a single linear
-/// pass with a name -> Tensor value cache — no separate topo-sort needed.
+/// pass with a name -> Tensor value cache â€” no separate topo-sort needed.
 library;
 
 import 'dart:math' as math;
@@ -66,7 +66,7 @@ class OnnxGraphExecutor {
   final Map<NodeProto, _AttrMap> _attributeMaps = Map.identity();
 
   /// Transposed copies of initializer weights fed to `Gemm` with `transB=1`,
-  /// built once on first use (ORT-style weight prepacking) — otherwise every
+  /// built once on first use (ORT-style weight prepacking) â€” otherwise every
   /// call re-materializes the transpose.
   final Map<String, Tensor> _prepackedGemmB = {};
 
@@ -100,7 +100,7 @@ class OnnxGraphExecutor {
   /// Minimum activation rows before a matmul is worth the isolate round-trip.
   static const _minPoolRows = 4;
 
-  /// Original TensorProto element types of the initializers — widening int8/
+  /// Original TensorProto element types of the initializers â€” widening int8/
   /// uint8 to int64 loses signedness, which QuantizeLinear's saturation
   /// bounds still need (3 = INT8 per the proto enum).
   final Map<String, int> _initializerElemType = {};
@@ -239,7 +239,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       uses.update(o.name, (v) => v + 1000, ifAbsent: () => 1000);
     }
     // Names captured by Loop/If/Scan body subgraphs are consumers the
-    // top-level scan above cannot see — protect them like graph outputs.
+    // top-level scan above cannot see â€” protect them like graph outputs.
     void protectSubgraphCaptures(GraphProto g) {
       for (final n in g.node) {
         for (final i in n.input) {
@@ -389,7 +389,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
 
     // GLU: Split(x, axis) -> [a, b]; Sigmoid(b) -> s; Mul(a, s) -> out, i.e.
     // `a * sigmoid(b)`, the gated activation Demucs (and many conv nets) use ~48
-    // times. Each is three full passes over a large channel tensor — fuse to
+    // times. Each is three full passes over a large channel tensor â€” fuse to
     // one (`_FusedGlu`).
     for (final split in nodes) {
       if (split.opType != 'Split' || split.output.length != 2) continue;
@@ -548,12 +548,12 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   }
 
   /// Autoregressive-decode rewrite: for each graph output that is a large
-  /// projection — `logits = [Cast]* <- MatMul(hidden[…, seq, h], W[h, vocab])`
-  /// — insert a `_SliceLastSeq` before the MatMul so only the **last** sequence
-  /// position is projected. During prefill (seq ≫ 1) the vocab matmul is the
+  /// projection â€” `logits = [Cast]* <- MatMul(hidden[â€¦, seq, h], W[h, vocab])`
+  /// â€” insert a `_SliceLastSeq` before the MatMul so only the **last** sequence
+  /// position is projected. During prefill (seq â‰« 1) the vocab matmul is the
   /// single largest op; a greedy/sampled generator only ever reads the last
   /// row, so computing the other `seq-1` rows is pure waste. Output logits
-  /// become `[…, 1, vocab]`. Opt-in (changes the output's seq extent), so the
+  /// become `[â€¦, 1, vocab]`. Opt-in (changes the output's seq extent), so the
   /// full-sequence parity path is unaffected.
   List<NodeProto> _sliceLogitsToLastToken(List<NodeProto> nodes) {
     final producers = {
@@ -600,7 +600,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   }
 
   /// Keeps only the last index along the second-to-last axis (the sequence
-  /// axis of a `[…, seq, hidden]` activation): `x[…, seq-1:seq, :]`. Used by the
+  /// axis of a `[â€¦, seq, hidden]` activation): `x[â€¦, seq-1:seq, :]`. Used by the
   /// last-token-logits rewrite so the vocab projection runs on one row.
   static Tensor _sliceLastSeq(Tensor x) {
     final rank = x.shape.length;
@@ -623,12 +623,12 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   }
 
   /// Executes every node whose inputs are all compile-time constants once,
-  /// storing the results as initializers and dropping the node — transformer
+  /// storing the results as initializers and dropping the node â€” transformer
   /// exports are full of `Constant`/`Shape`-arithmetic chains that would
   /// otherwise be recomputed identically on every run.
   List<NodeProto> _foldConstants() {
     // An initializer that is also a graph input is only a *default* the
-    // caller may override at run time — never fold through those.
+    // caller may override at run time â€” never fold through those.
     final overridable = {for (final vi in _graph.input) vi.name};
     final constNames = {
       for (final name in _initializers.keys)
@@ -676,11 +676,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   /// requested named outputs.
   ///
   /// Pass a [profile] to accumulate per-op-type wall time across the run
-  /// (adds one Stopwatch read per node — negligible next to the op work).
+  /// (adds one Stopwatch read per node â€” negligible next to the op work).
   /// Validates provided inputs against the graph's declared signatures:
   /// missing required inputs and fixed-dimension mismatches fail loudly here
   /// instead of producing silently wrong numbers downstream (batch-fixed
-  /// exports are a real hazard — ORT rejects such feeds too).
+  /// exports are a real hazard â€” ORT rejects such feeds too).
   void _validateInputs(Map<String, Tensor> inputs) {
     for (final vi in _graph.input) {
       final t = inputs[vi.name];
@@ -704,7 +704,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         final want = dims[i].dimValue.toInt();
         if (want > 0 && want != t.shape[i]) {
           throw ArgumentError('Input "${vi.name}": dim $i is ${t.shape[i]}, '
-              'model declares fixed size $want — this export does not '
+              'model declares fixed size $want â€” this export does not '
               'support that shape');
         }
       }
@@ -791,7 +791,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         if (node.input.length > 2 &&
             node.input[2].isNotEmpty &&
             biasT == null) {
-          continue; // runtime bias — keep local
+          continue; // runtime bias â€” keep local
         }
         convToReplicate[node.input[1]] = (w.f!, w.shape, biasT?.f);
       }
@@ -1048,7 +1048,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     return [for (final o in g.output) values[o.name]!];
   }
 
-  /// `Scan` — inputs `[state_1..state_M, scan_1..scan_N]`; body graph maps
+  /// `Scan` â€” inputs `[state_1..state_M, scan_1..scan_N]`; body graph maps
   /// `[states, scan slices] -> [states, scan output slices]`. Scan inputs
   /// are sliced along their `scan_input_axes` (default 0), optionally
   /// reversed; scan outputs stack along `scan_output_axes` (default a new
@@ -1124,7 +1124,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     ];
   }
 
-  /// `Loop` — inputs `[M?, cond?, v_1..v_N]`; body graph inputs
+  /// `Loop` â€” inputs `[M?, cond?, v_1..v_N]`; body graph inputs
   /// `[iter, cond, v_1..v_N]`, outputs `[cond, v_1..v_N, scan_1..scan_K]`.
   /// Node outputs are the final `v` values, then each scan output stacked
   /// along a new leading axis.
@@ -1229,7 +1229,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
               attrs.getFloat('epsilon')!)
         ];
       case 'GroupQueryAttention':
-        // Returns [output, present_key, present_value] — the present KV feeds
+        // Returns [output, present_key, present_value] â€” the present KV feeds
         // the next decode step's past_key/past_value.
         return ops.opGroupQueryAttention(need(0), need(1), need(2),
             numHeads: attrs.getInt('num_heads')!,
@@ -1694,6 +1694,15 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       // --- convolution / pooling / normalization family ---
       case 'Conv':
         final convW = need(1);
+        final declaredKernelShape = attrs.getInts('kernel_shape');
+        final weightKernelShape = convW.shape.sublist(2);
+        if (declaredKernelShape != null &&
+            declaredKernelShape.toString() != weightKernelShape.toString()) {
+          throw StateError(
+            'Conv kernel_shape $declaredKernelShape does not match weight '
+            'shape $weightKernelShape.',
+          );
+        }
         final convStrides = attrs.getInts('strides');
         final convPads = attrs.getInts('pads');
         final convDilations = attrs.getInts('dilations');
@@ -1731,11 +1740,21 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 : null,
           )
         ];
-      case 'ConvTranspose':
+      case 'ConvTranspose': {
+        final convTW = need(1);
+        final declaredKernelShape = attrs.getInts('kernel_shape');
+        final weightKernelShape = convTW.shape.sublist(2);
+        if (declaredKernelShape != null &&
+            declaredKernelShape.toString() != weightKernelShape.toString()) {
+          throw StateError(
+            'ConvTranspose kernel_shape $declaredKernelShape does not match '
+            'weight shape $weightKernelShape.',
+          );
+        }
         return [
           nn.opConvTranspose(
             need(0),
-            need(1),
+            convTW,
             ins.length > 2 ? ins[2] : null,
             strides: attrs.getInts('strides'),
             pads: attrs.getInts('pads'),
@@ -1745,6 +1764,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             group: attrs.getInt('group') ?? 1,
           )
         ];
+      }
       case 'MaxPool':
         return [
           nn.opMaxPool(
@@ -1840,7 +1860,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [nn.opFlatten(need(0), attrs.getInt('axis') ?? 1)];
       case 'Upsample':
         // Deprecated pre-Resize op (opset <= 9): asymmetric coordinates,
-        // floor rounding — exactly Resize-10's semantics.
+        // floor rounding â€” exactly Resize-10's semantics.
         return [
           nn.opResize(
             need(0),
@@ -2192,7 +2212,7 @@ class _AttrMap {
           tensorFromProto(_byName[name]!.t, ext: _ext))
       : null;
 
-  /// The value produced by a `Constant` node — either a `value` tensor or one
+  /// The value produced by a `Constant` node â€” either a `value` tensor or one
   /// of the scalar/list attribute forms the op allows.
   Tensor constantTensor() {
     if (_byName.containsKey('value')) {
