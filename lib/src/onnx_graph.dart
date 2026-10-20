@@ -1,10 +1,11 @@
-﻿/// Executes a parsed ONNX graph node-by-node. ONNX graphs are required by
+/// Executes a parsed ONNX graph node-by-node. ONNX graphs are required by
 /// the spec to be in topological order already, so this is a single linear
 /// pass with a name -> Tensor value cache â€” no separate topo-sort needed.
 library;
 
 import 'dart:math' as math;
 import 'dart:typed_data' hide Int64List;
+
 import 'int64_storage.dart';
 
 import 'package:fixnum/fixnum.dart';
@@ -39,9 +40,11 @@ class ExecutionProfile {
     final sorted = [...nodes]..sort((a, b) => b.micros.compareTo(a.micros));
     final b = StringBuffer('${'op'.padRight(18)}${'ms'.padLeft(10)}  node\n');
     for (final n in sorted.take(limit)) {
-      b.writeln('${n.opType.padRight(18)}'
-          '${(n.micros / 1000).toStringAsFixed(1).padLeft(10)}  ${n.name}'
-          '${n.detail.isEmpty ? '' : '  ${n.detail}'}');
+      b.writeln(
+        '${n.opType.padRight(18)}'
+        '${(n.micros / 1000).toStringAsFixed(1).padLeft(10)}  ${n.name}'
+        '${n.detail.isEmpty ? '' : '  ${n.detail}'}',
+      );
     }
     return b.toString();
   }
@@ -53,16 +56,21 @@ class ExecutionProfile {
       ..sort((a, b) => microsByOp[b]!.compareTo(microsByOp[a]!));
     final total = totalMicros;
     final b = StringBuffer(
-        '${'op'.padRight(22)}${'calls'.padLeft(7)}${'ms'.padLeft(10)}'
-        '${'share'.padLeft(8)}\n');
+      '${'op'.padRight(22)}${'calls'.padLeft(7)}${'ms'.padLeft(10)}'
+      '${'share'.padLeft(8)}\n',
+    );
     for (final op in ops) {
       final us = microsByOp[op]!;
-      b.writeln('${op.padRight(22)}${callsByOp[op]!.toString().padLeft(7)}'
-          '${(us / 1000).toStringAsFixed(1).padLeft(10)}'
-          '${total == 0 ? '' : '${(us * 100 / total).toStringAsFixed(1)}%'.padLeft(8)}');
+      b.writeln(
+        '${op.padRight(22)}${callsByOp[op]!.toString().padLeft(7)}'
+        '${(us / 1000).toStringAsFixed(1).padLeft(10)}'
+        '${total == 0 ? '' : '${(us * 100 / total).toStringAsFixed(1)}%'.padLeft(8)}',
+      );
     }
-    b.write('${'total'.padRight(29)}'
-        '${(total / 1000).toStringAsFixed(1).padLeft(10)}');
+    b.write(
+      '${'total'.padRight(29)}'
+      '${(total / 1000).toStringAsFixed(1).padLeft(10)}',
+    );
     return b.toString();
   }
 }
@@ -146,18 +154,19 @@ class OnnxGraphExecutor {
   /// opset-sensitive, e.g. RoiAlign's coordinate transform).
   late final int _opset;
 
-  OnnxGraphExecutor(ModelProto model,
-      {ExternalDataResolver? externalData,
-      Map<TensorProto, Tensor> decodedTensors = const {},
-      Map<String, ExternalGatherTable> deferredTables = const {},
-      bool fuse = true,
-      bool lastTokenLogits = false,
-      Set<OnnxExperiment> experiments = const {}})
-      : _graph = model.graph,
-        _ext = externalData,
-        _decodedTensors = decodedTensors,
-        _deferredTables = Map.of(deferredTables),
-        experiments = Set.unmodifiable(experiments) {
+  OnnxGraphExecutor(
+    ModelProto model, {
+    ExternalDataResolver? externalData,
+    Map<TensorProto, Tensor> decodedTensors = const {},
+    Map<String, ExternalGatherTable> deferredTables = const {},
+    bool fuse = true,
+    bool lastTokenLogits = false,
+    Set<OnnxExperiment> experiments = const {},
+  }) : _graph = model.graph,
+       _ext = externalData,
+       _decodedTensors = decodedTensors,
+       _deferredTables = Map.of(deferredTables),
+       experiments = Set.unmodifiable(experiments) {
     final report = auditOnnxModel(model);
     report.throwIfIncompatible();
     final control = activeOnnxControl;
@@ -169,18 +178,29 @@ class OnnxGraphExecutor {
     }
     void recordTypes(GraphProto g) {
       for (final vi in [...g.input, ...g.output, ...g.valueInfo]) {
-        if (vi.type.tensorType.elemType != 0) _valueElementTypes[vi.name] = vi.type.tensorType.elemType;
+        if (vi.type.tensorType.elemType != 0)
+          _valueElementTypes[vi.name] = vi.type.tensorType.elemType;
       }
-      for (final t in g.initializer) { _valueElementTypes[t.name] = t.dataType; }
-      for (final n in g.node) { for (final a in n.attribute) {
-        if (a.hasG()) recordTypes(a.g);
-        for (final sub in a.graphs) { recordTypes(sub); }
-      } }
+      for (final t in g.initializer) {
+        _valueElementTypes[t.name] = t.dataType;
+      }
+      for (final n in g.node) {
+        for (final a in n.attribute) {
+          if (a.hasG()) recordTypes(a.g);
+          for (final sub in a.graphs) {
+            recordTypes(sub);
+          }
+        }
+      }
     }
+
     recordTypes(_graph);
     final loadPhase = _decodedTensors.isEmpty ? 'load' : 'prepare';
     control?.account(const []);
-    control?.checkAdditionalBytes(report.initializerBytes - (_deferredTables.isEmpty ? 0 : report.deferredInitializerBytes));
+    control?.checkAdditionalBytes(
+      report.initializerBytes -
+          (_deferredTables.isEmpty ? 0 : report.deferredInitializerBytes),
+    );
     control?.progress(loadPhase, 0, _graph.initializer.length);
     _opset = model.opsetImport
         .where((o) => canonicalOnnxDomain(o.domain).isEmpty)
@@ -194,12 +214,17 @@ class OnnxGraphExecutor {
       _initializerElemType[t.name] = t.dataType;
       control?.account(_residentTensors);
       control?.progress(
-          loadPhase, _initializers.length, _graph.initializer.length);
+        loadPhase,
+        _initializers.length,
+        _graph.initializer.length,
+      );
     }
     final folded = _foldConstants();
     // FP16 graphs need rounding at original node boundaries; float-only
     // pattern fusion can otherwise remove observable intermediate rounding.
-    var nodes = fuse && !_valueElementTypes.containsValue(10) ? _fusePatterns(folded) : folded;
+    var nodes = fuse && !_valueElementTypes.containsValue(10)
+        ? _fusePatterns(folded)
+        : folded;
     if (lastTokenLogits) nodes = _sliceLogitsToLastToken(nodes);
     _nodes = nodes;
     control?.account(_residentTensors);
@@ -210,16 +235,20 @@ class OnnxGraphExecutor {
       return _AttrMap(node.attribute, _ext, false, _decodedTensors);
     }
     return _attributeMaps.putIfAbsent(
-        node, () => _AttrMap(node.attribute, _ext, true, _decodedTensors));
+      node,
+      () => _AttrMap(node.attribute, _ext, true, _decodedTensors),
+    );
   }
-List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
+
+  List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     for (var i = 0; i < outputs.length; i++)
       if (i < node.output.length &&
           _valueElementTypes[node.output[i]] == 10 &&
           outputs[i].isFloat &&
           !outputs[i].cacheView)
         ops.opCast(outputs[i], 10)
-      else outputs[i],
+      else
+        outputs[i],
   ];
 
   /// The graph inputs a caller must feed (graph inputs that aren't also
@@ -231,7 +260,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       if (_initializers.containsKey(vi.name)) continue; // has a default
       final tt = vi.type.tensorType;
       final shape = [
-        for (final d in tt.shape.dim) d.hasDimValue() ? d.dimValue.toInt() : -1
+        for (final d in tt.shape.dim) d.hasDimValue() ? d.dimValue.toInt() : -1,
       ];
       out.add(TensorSpec(vi.name, shape, tt.elemType));
     }
@@ -322,8 +351,13 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         final name = relu.input[0];
         final i = producerIdx[name];
         if (i == null || uses[name] != 1) continue;
-        if (!const {'Conv', 'Add', 'Sub', 'Mul', 'Div'}
-            .contains(nodes[i].opType)) {
+        if (!const {
+          'Conv',
+          'Add',
+          'Sub',
+          'Mul',
+          'Div',
+        }.contains(nodes[i].opType)) {
           continue;
         }
         replaceAt[relu] = NodeProto()
@@ -349,8 +383,13 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           final i = producerIdx[name];
           return i != null &&
               uses[name] == 1 &&
-              const {'Conv', 'Add', 'Sub', 'Mul', 'Div'}
-                  .contains(nodes[i].opType);
+              const {
+                'Conv',
+                'Add',
+                'Sub',
+                'Mul',
+                'Div',
+              }.contains(nodes[i].opType);
         });
         if (reusable >= 0) {
           inPlace = true;
@@ -377,7 +416,8 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       final pre = div ?? mulIn;
       if (pre == null || uses[erf.input[0]] != 1) continue;
       final c = scalarInit(pre.input[1]);
-      final okScale = c != null &&
+      final okScale =
+          c != null &&
           (div != null
               ? (c - math.sqrt2).abs() < 1e-4
               : (c - 1 / math.sqrt2).abs() < 1e-4);
@@ -387,17 +427,20 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       final add = soleConsumer(erf.output[0]);
       if (add == null || add.opType != 'Add') continue;
       final one = scalarInit(
-          add.input[0] == erf.output[0] ? add.input[1] : add.input[0]);
+        add.input[0] == erf.output[0] ? add.input[1] : add.input[0],
+      );
       if (one == null || (one - 1).abs() > 1e-6) continue;
       // * x, then * 0.5 (either order)
       final mul1 = soleConsumer(add.output[0]);
       if (mul1 == null || mul1.opType != 'Mul') continue;
-      final mul1Other =
-          mul1.input[0] == add.output[0] ? mul1.input[1] : mul1.input[0];
+      final mul1Other = mul1.input[0] == add.output[0]
+          ? mul1.input[1]
+          : mul1.input[0];
       final mul2 = soleConsumer(mul1.output[0]);
       if (mul2 == null || mul2.opType != 'Mul') continue;
-      final mul2Other =
-          mul2.input[0] == mul1.output[0] ? mul2.input[1] : mul2.input[0];
+      final mul2Other = mul2.input[0] == mul1.output[0]
+          ? mul2.input[1]
+          : mul2.input[0];
       final bool xThenHalf =
           mul1Other == x && (scalarInit(mul2Other) ?? 0) == 0.5;
       final bool halfThenX =
@@ -421,7 +464,8 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       // Must be an equal 2-way split (GLU halves the axis).
       final splitAttrs = _AttrMap(split.attribute, _ext);
       final axis = splitAttrs.getInt('axis') ?? 0;
-      final sizes = splitAttrs.getInts('split') ??
+      final sizes =
+          splitAttrs.getInts('split') ??
           (split.input.length > 1
               ? _initializers[split.input[1]]?.asIntList()
               : null);
@@ -442,9 +486,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         ..name = 'fused_glu_${mul.output[0]}'
         ..input.add(split.input[0])
         ..output.add(mul.output[0])
-        ..attribute.add(AttributeProto()
-          ..name = 'axis'
-          ..i = Int64(axis));
+        ..attribute.add(
+          AttributeProto()
+            ..name = 'axis'
+            ..i = Int64(axis),
+        );
     }
 
     // RMSNorm: x -> Pow(2) -> ReduceMean(axis) -> Add(eps) -> Sqrt ->
@@ -471,7 +517,8 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       final addEps = soleConsumer(rm.output[0]);
       if (addEps == null || addEps.opType != 'Add') continue;
       final eps = scalarInit(
-          addEps.input[0] == rm.output[0] ? addEps.input[1] : addEps.input[0]);
+        addEps.input[0] == rm.output[0] ? addEps.input[1] : addEps.input[0],
+      );
       if (eps == null) continue;
       final sqrt = soleConsumer(addEps.output[0]);
       if (sqrt == null || sqrt.opType != 'Sqrt') continue;
@@ -479,13 +526,15 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       if (rec == null || rec.opType != 'Reciprocal') continue;
       final mul1 = soleConsumer(rec.output[0]);
       if (mul1 == null || mul1.opType != 'Mul') continue;
-      final mul1Other =
-          mul1.input[0] == rec.output[0] ? mul1.input[1] : mul1.input[0];
+      final mul1Other = mul1.input[0] == rec.output[0]
+          ? mul1.input[1]
+          : mul1.input[0];
       if (mul1Other != x) continue;
       final mul2 = soleConsumer(mul1.output[0]);
       if (mul2 == null || mul2.opType != 'Mul') continue;
-      final gamma =
-          mul2.input[0] == mul1.output[0] ? mul2.input[1] : mul2.input[0];
+      final gamma = mul2.input[0] == mul1.output[0]
+          ? mul2.input[1]
+          : mul2.input[0];
       final gammaT = _initializers[gamma];
       if (gammaT == null || gammaT.rank != 1) continue;
 
@@ -558,9 +607,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         ..name = 'fused_sdpa_${mm2.output[0]}'
         ..input.addAll([mm1.input[0], mm1.input[1], mm2.input[1], mask!])
         ..output.add(mm2.output[0])
-        ..attribute.add(AttributeProto()
-          ..name = 'scale'
-          ..f = scaleVal);
+        ..attribute.add(
+          AttributeProto()
+            ..name = 'scale'
+            ..f = scaleVal,
+        );
     }
 
     return [
@@ -568,7 +619,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         if (replaceAt.containsKey(n))
           replaceAt[n]!
         else if (!removed.contains(n))
-          n
+          n,
     ];
   }
 
@@ -583,7 +634,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   List<NodeProto> _sliceLogitsToLastToken(List<NodeProto> nodes) {
     final producers = {
       for (final n in nodes)
-        for (final o in n.output) o: n
+        for (final o in n.output) o: n,
     };
     // Identity-keyed: NodeProto uses value equality, and we mutate the matmul's
     // input below, which would change a value-based hash out from under the map.
@@ -617,10 +668,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     }
     if (inserts.isEmpty) return nodes;
     return [
-      for (final n in nodes) ...[
-        if (inserts.containsKey(n)) inserts[n]!,
-        n,
-      ]
+      for (final n in nodes) ...[if (inserts.containsKey(n)) inserts[n]!, n],
     ];
   }
 
@@ -657,7 +705,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     final overridable = {for (final vi in _graph.input) vi.name};
     final constNames = {
       for (final name in _initializers.keys)
-        if (!overridable.contains(name)) name
+        if (!overridable.contains(name)) name,
     };
     final kept = <NodeProto>[];
     for (final node in _graph.node) {
@@ -670,7 +718,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       List<Tensor> outs;
       try {
         final ins = [
-          for (final s in node.input) s.isEmpty ? null : _initializers[s]
+          for (final s in node.input) s.isEmpty ? null : _initializers[s],
         ];
         outs = _dispatch(node, ins, _attrsFor(node));
       } on OnnxCancelledException {
@@ -717,27 +765,35 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       if (elementType != 0 &&
           (const {1, 10, 11}.contains(elementType) != t.isFloat)) {
         throw ArgumentError(
-            'Input "${vi.name}": tensor storage does not match declared element type $elementType');
+          'Input "${vi.name}": tensor storage does not match declared element type $elementType',
+        );
       }
       final dims = vi.type.tensorType.shape.dim;
       if (dims.isEmpty) continue; // no declared shape
       if (dims.length != t.rank) {
-        throw ArgumentError('Input "${vi.name}": rank ${t.rank} provided, '
-            'model declares rank ${dims.length}');
+        throw ArgumentError(
+          'Input "${vi.name}": rank ${t.rank} provided, '
+          'model declares rank ${dims.length}',
+        );
       }
       for (int i = 0; i < dims.length; i++) {
         final want = dims[i].dimValue.toInt();
         if (want > 0 && want != t.shape[i]) {
-          throw ArgumentError('Input "${vi.name}": dim $i is ${t.shape[i]}, '
-              'model declares fixed size $want â€” this export does not '
-              'support that shape');
+          throw ArgumentError(
+            'Input "${vi.name}": dim $i is ${t.shape[i]}, '
+            'model declares fixed size $want â€” this export does not '
+            'support that shape',
+          );
         }
       }
     }
   }
 
-  Map<String, Tensor> run(Map<String, Tensor> inputs, List<String> outputNames,
-      {ExecutionProfile? profile}) {
+  Map<String, Tensor> run(
+    Map<String, Tensor> inputs,
+    List<String> outputNames, {
+    ExecutionProfile? profile,
+  }) {
     _validateInputs(inputs);
     final values = <String, Tensor>{..._initializers, ...inputs};
     _execNodes(_nodes, values, profile, retain: outputNames.toSet());
@@ -753,41 +809,25 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   /// [runAsync] executes those matmuls on the pool; [run] stays
   /// single-threaded. Native targets only.
   /// [poolConv] additionally fans 2-D convolutions out across the workers by
-  /// output-row bands. Off by default: conv messages carry the whole input
-  /// activation to every worker, and for CNN workloads measured so far that
-  /// copying costs more than the banded compute saves (unlike matmuls, whose
-  /// per-call messages are small). Worth trying for large batches or very
-  /// high-resolution inputs.
-  Future<void> parallelize(
-      {required int workers,
-      int minWeightElements = 65536,
-      bool poolConv = false}) async {
+  /// output-row bands, shipping each conv's kernel with its request rather than
+  /// replicating every weight to every worker. It is a large win for compute-
+  /// bound CNNs (LaMa 1024²: 109 s → 22 s on 16 workers); leave it off for small
+  /// models where per-request overhead dominates.
+  Future<void> parallelize({
+    required int workers,
+    int minWeightElements = 65536,
+    bool poolConv = false,
+  }) async {
     final toPartition = <String, (Float32List, int, int)>{};
     final convToReplicate = <String, (Float32List, List<int>, Float32List?)>{};
+    final convNames = <String>{};
     for (final node in _nodes) {
       if (node.opType == 'Conv' && !poolConv) continue;
       if (node.opType == 'Conv' && poolConv) {
-        final w = node.input.length > 1 ? _initializers[node.input[1]] : null;
         final a = _attrsFor(node);
         // Band slicing assumes independent output rows per group; depthwise /
         // grouped convs fall back to the local path.
         if ((a.getInt('group') ?? 1) != 1) continue;
-        final strides = a.getInts('strides');
-        final dilations = a.getInts('dilations');
-        final pads = a.getInts('pads');
-        if (w != null &&
-            w.isFloat &&
-            w.rank == 4 &&
-            w.shape[2] == 3 &&
-            w.shape[3] == 3 &&
-            (a.getInt('group') ?? 1) == 1 &&
-            (strides == null || strides.every((v) => v == 1)) &&
-            (dilations == null || dilations.every((v) => v == 1)) &&
-            pads != null &&
-            pads.length == 4 &&
-            pads.every((v) => v == 1)) {
-          continue; // local Winograd is faster and preserves run/runAsync parity
-        }
       }
       if (node.opType == 'ConvTranspose') {
         if (!poolConv) continue;
@@ -808,8 +848,9 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             biasT == null) {
           continue; // runtime bias — keep local
         }
+        // ConvTranspose weights stay replicated: there are only a handful and
+        // the banded worker path looks them up by name.
         convToReplicate[node.input[1]] = (w.f!, w.shape, biasT?.f);
-        continue;
       }
       if (node.opType == 'MatMul' && node.input.length >= 2) {
         final name = node.input[1];
@@ -836,17 +877,26 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         // 1-D convs pool as 2-D with a singleton trailing axis, so the
         // output-row band split runs along time.
         if (w.rank == 3) w = w.reshape([...w.shape, 1]);
-        final biasT =
-            node.input.length > 2 ? _initializers[node.input[2]] : null;
+        final biasT = node.input.length > 2
+            ? _initializers[node.input[2]]
+            : null;
         if (node.input.length > 2 &&
             node.input[2].isNotEmpty &&
             biasT == null) {
-          continue; // runtime bias â€” keep local
+          continue; // runtime bias — keep local
         }
-        convToReplicate[node.input[1]] = (w.f!, w.shape, biasT?.f);
+        // Ship the kernel with each conv request instead of replicating every
+        // weight to every worker: a 196 MB model at 16 workers would otherwise
+        // pin ~3 GB of duplicates for the lifetime of the pool.
+        convNames.add(node.input[1]);
       }
     }
-    _pool = await GemmPool.spawn(workers, toPartition, convToReplicate);
+    _pool = await GemmPool.spawn(
+      workers,
+      toPartition,
+      convToReplicate,
+      convNames,
+    );
   }
 
   void dispose() {
@@ -857,8 +907,10 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   /// Async variant of [run]: identical semantics and (bitwise) results, but
   /// pool-partitioned matmuls execute across the worker isolates.
   Future<Map<String, Tensor>> runAsync(
-      Map<String, Tensor> inputs, List<String> outputNames,
-      {ExecutionProfile? profile}) async {
+    Map<String, Tensor> inputs,
+    List<String> outputNames, {
+    ExecutionProfile? profile,
+  }) async {
     _validateInputs(inputs);
     final values = <String, Tensor>{..._initializers, ...inputs};
     final sw = profile == null ? null : Stopwatch();
@@ -876,7 +928,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       }
       final attrs = _attrsFor(node);
       final ins = [
-        for (final name in node.input) name.isEmpty ? null : values[name]
+        for (final name in node.input) name.isEmpty ? null : values[name],
       ];
       List<Tensor> outs;
       sw
@@ -890,17 +942,20 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         final gemmPart = pool != null && node.opType == 'Gemm'
             ? pool.weights['gemm:${node.input[1]}']
             : null;
-        final convX = pool != null &&
+        final convX =
+            pool != null &&
                 node.opType == 'Conv' &&
                 pool.convWeights.contains(node.input[1])
             ? ins[0]
             : null;
-        final ctX = pool != null &&
+        final ctX =
+            pool != null &&
                 node.opType == 'ConvTranspose' &&
                 pool.convWeights.contains(node.input[1])
             ? ins[0]
             : null;
-        if (node.opType == 'Gather' && _deferredTables.containsKey(node.input[0])) {
+        if (node.opType == 'Gather' &&
+            _deferredTables.containsKey(node.input[0])) {
           outs = [await _deferredTables[node.input[0]]!.gatherAsync(ins[1]!)];
         } else if (part != null &&
             a != null &&
@@ -911,7 +966,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           final m = a.length ~/ part.k;
           final out = await pool!.matmul(node.input[1], a.f!, m);
           outs = [
-            Tensor.float(out, [...a.shape.sublist(0, a.rank - 1), part.n])
+            Tensor.float(out, [...a.shape.sublist(0, a.rank - 1), part.n]),
           ];
         } else if (gemmPart != null &&
             ins[0] != null &&
@@ -934,7 +989,9 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           if (c != null) {
             final beta = attrs.getFloat('beta') ?? 1.0;
             y = ops.opAdd(
-                y, beta == 1.0 ? c : ops.opMul(c, Tensor.scalarFloat(beta)));
+              y,
+              beta == 1.0 ? c : ops.opMul(c, Tensor.scalarFloat(beta)),
+            );
           }
           outs = [y];
         } else if (pool != null &&
@@ -956,11 +1013,18 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           final aM = ins[0]!;
           final bM = ins[1]!;
           final m = aM.length ~/ bM.shape[0];
-          final raw =
-              await pool.matmulRuntime(aM.f!, m, bM.f!, bM.shape[0], bM.shape[1]);
+          final raw = await pool.matmulRuntime(
+            aM.f!,
+            m,
+            bM.f!,
+            bM.shape[0],
+            bM.shape[1],
+          );
           outs = [
-            Tensor.float(raw,
-                [...aM.shape.sublist(0, aM.rank - 1), bM.shape[1]])
+            Tensor.float(raw, [
+              ...aM.shape.sublist(0, aM.rank - 1),
+              bM.shape[1],
+            ]),
           ];
         } else if (pool != null &&
             node.opType == 'MatMul' &&
@@ -983,11 +1047,20 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           final k = aM.shape[1];
           final n = bM.shape.last;
           final batch = bM.length ~/ (k * n);
-          final raw = await pool.matmulBatched(aM.f!, aM.shape[0], k, bM.f!,
-              batch, n);
+          final raw = await pool.matmulBatched(
+            aM.f!,
+            aM.shape[0],
+            k,
+            bM.f!,
+            batch,
+            n,
+          );
           outs = [
-            Tensor.float(raw,
-                [...bM.shape.sublist(0, bM.rank - 2), aM.shape[0], n])
+            Tensor.float(raw, [
+              ...bM.shape.sublist(0, bM.rank - 2),
+              aM.shape[0],
+              n,
+            ]),
           ];
         } else if (convX != null &&
             convX.isFloat &&
@@ -1001,15 +1074,31 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           final pads0 = attrsC.getInts('pads');
           final dil0 = attrsC.getInts('dilations');
           final strides = oneD ? [strides0?.first ?? 1, 1] : strides0;
-          final padsAttr =
-              oneD ? [pads0?[0] ?? 0, 0, pads0?[1] ?? 0, 0] : pads0;
+          final padsAttr = oneD
+              ? [pads0?[0] ?? 0, 0, pads0?[1] ?? 0, 0]
+              : pads0;
           final dilations = oneD ? [dil0?.first ?? 1, 1] : dil0;
           final autoPad = attrsC.getString('auto_pad') ?? 'NOTSET';
-          final outSp = nn.convOutputSpatial(x4.shape.sublist(2),
-              w.shape.sublist(2), strides, padsAttr, dilations, autoPad);
+          final outSp = nn.convOutputSpatial(
+            x4.shape.sublist(2),
+            w.shape.sublist(2),
+            strides,
+            padsAttr,
+            dilations,
+            autoPad,
+          );
           if (outSp[0] < pool!.workerCount * 2) {
             outs = _dispatch(node, ins, attrs); // too few rows to split
           } else {
+            final useWino = nn.convWinogradEligible(
+              wShape: w.shape,
+              inShape: x4.shape,
+              strides: strides,
+              pads: padsAttr,
+              dilations: dilations,
+              group: attrsC.getInt('group') ?? 1,
+              autoPad: autoPad,
+            );
             final out = await pool.conv(
               node.input[1],
               x4.f!,
@@ -1024,10 +1113,13 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
               m: w.shape[0],
               oh: outSp[0],
               ow: outSp[1],
+              winograd: useWino,
+              weight: w,
+              bias: node.input.length > 2 ? _initializers[node.input[2]] : null,
             );
             final y = Tensor.float(out, [x4.shape[0], w.shape[0], ...outSp]);
             outs = [
-              oneD ? y.reshape([y.shape[0], y.shape[1], y.shape[2]]) : y
+              oneD ? y.reshape([y.shape[0], y.shape[1], y.shape[2]]) : y,
             ];
           }
         } else if (ctX != null &&
@@ -1068,16 +1160,21 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
               ow: outW,
             );
             outs = [
-              Tensor.float(out, [ctX.shape[0], w.shape[1], outH, outW])
+              Tensor.float(out, [ctX.shape[0], w.shape[1], outH, outW]),
             ];
           }
         } else {
           switch (node.opType) {
             case 'If':
-              final branch =
-                  ins[0]!.getI(0) != 0 ? 'then_branch' : 'else_branch';
+              final branch = ins[0]!.getI(0) != 0
+                  ? 'then_branch'
+                  : 'else_branch';
               outs = _execSubgraph(
-                  attrs.getGraph(branch)!, values, const [], profile);
+                attrs.getGraph(branch)!,
+                values,
+                const [],
+                profile,
+              );
             case 'Loop':
               outs = _runLoop(node, ins, attrs, values, profile);
             case 'Scan':
@@ -1091,20 +1188,27 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       } on OnnxMemoryLimitException {
         rethrow;
       } catch (e) {
-        throw StateError('ONNX graph execution failed at node "${node.name}" '
-            '(op=${node.opType}): $e');
+        throw StateError(
+          'ONNX graph execution failed at node "${node.name}" '
+          '(op=${node.opType}): $e',
+        );
       }
       if (profile != null) {
         sw!.stop();
         profile.callsByOp.update(node.opType, (v) => v + 1, ifAbsent: () => 1);
         profile.microsByOp.update(
-            node.opType, (v) => v + sw.elapsedMicroseconds,
-            ifAbsent: () => sw.elapsedMicroseconds);
-        profile.nodes.add(NodeProfile(
+          node.opType,
+          (v) => v + sw.elapsedMicroseconds,
+          ifAbsent: () => sw.elapsedMicroseconds,
+        );
+        profile.nodes.add(
+          NodeProfile(
             node.name,
             node.opType,
             sw.elapsedMicroseconds,
-            ins.map((t) => t?.shape.toString() ?? '-').join(' ')));
+            ins.map((t) => t?.shape.toString() ?? '-').join(' '),
+          ),
+        );
       }
       outs = _roundOutputs(node, outs);
       for (int k = 0; k < node.output.length && k < outs.length; k++) {
@@ -1135,7 +1239,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       control?.checkpoint();
       final attrs = _attrsFor(node);
       final ins = [
-        for (final name in node.input) name.isEmpty ? null : values[name]
+        for (final name in node.input) name.isEmpty ? null : values[name],
       ];
       List<Tensor> outs;
       sw
@@ -1148,7 +1252,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           case 'If':
             final branch = ins[0]!.getI(0) != 0 ? 'then_branch' : 'else_branch';
             outs = _execSubgraph(
-                attrs.getGraph(branch)!, values, const [], profile);
+              attrs.getGraph(branch)!,
+              values,
+              const [],
+              profile,
+            );
           case 'Loop':
             outs = _runLoop(node, ins, attrs, values, profile);
           case 'Scan':
@@ -1162,22 +1270,29 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         rethrow;
       } catch (e) {
         final shapes = [
-          for (final t in ins) t == null ? 'null' : t.shape.toString()
+          for (final t in ins) t == null ? 'null' : t.shape.toString(),
         ].join(', ');
-        throw StateError('ONNX graph execution failed at node "${node.name}" '
-            '(op=${node.opType}, input shapes: $shapes): $e');
+        throw StateError(
+          'ONNX graph execution failed at node "${node.name}" '
+          '(op=${node.opType}, input shapes: $shapes): $e',
+        );
       }
       if (profile != null) {
         sw!.stop();
         profile.callsByOp.update(node.opType, (v) => v + 1, ifAbsent: () => 1);
         profile.microsByOp.update(
-            node.opType, (v) => v + sw.elapsedMicroseconds,
-            ifAbsent: () => sw.elapsedMicroseconds);
-        profile.nodes.add(NodeProfile(
+          node.opType,
+          (v) => v + sw.elapsedMicroseconds,
+          ifAbsent: () => sw.elapsedMicroseconds,
+        );
+        profile.nodes.add(
+          NodeProfile(
             node.name,
             node.opType,
             sw.elapsedMicroseconds,
-            ins.map((t) => t?.shape.toString() ?? '-').join(' ')));
+            ins.map((t) => t?.shape.toString() ?? '-').join(' '),
+          ),
+        );
       }
       outs = _roundOutputs(node, outs);
       for (int k = 0; k < node.output.length && k < outs.length; k++) {
@@ -1194,8 +1309,12 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   /// (ONNX subgraphs capture outer values by name), binding [boundInputs]
   /// positionally to the subgraph's declared inputs. Returns the subgraph's
   /// outputs in declaration order.
-  List<Tensor> _execSubgraph(GraphProto g, Map<String, Tensor> outer,
-      List<Tensor?> boundInputs, ExecutionProfile? profile) {
+  List<Tensor> _execSubgraph(
+    GraphProto g,
+    Map<String, Tensor> outer,
+    List<Tensor?> boundInputs,
+    ExecutionProfile? profile,
+  ) {
     final values = Map.of(outer);
     for (final t in g.initializer) {
       values[t.name] = _decodedTensors[t] ?? tensorFromProto(t, ext: _ext);
@@ -1212,8 +1331,13 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
   /// are sliced along their `scan_input_axes` (default 0), optionally
   /// reversed; scan outputs stack along `scan_output_axes` (default a new
   /// axis 0), optionally reversed.
-  List<Tensor> _runScan(NodeProto node, List<Tensor?> ins, _AttrMap attrs,
-      Map<String, Tensor> values, ExecutionProfile? profile) {
+  List<Tensor> _runScan(
+    NodeProto node,
+    List<Tensor?> ins,
+    _AttrMap attrs,
+    Map<String, Tensor> values,
+    ExecutionProfile? profile,
+  ) {
     final body = attrs.getGraph('body')!;
     final nScan = attrs.getInt('num_scan_inputs')!;
     final inAxesAttr = attrs.getInts('scan_input_axes');
@@ -1229,7 +1353,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         () {
           final a = inAxesAttr == null ? 0 : inAxesAttr[j];
           return a < 0 ? a + scanIns[j].rank : a;
-        }()
+        }(),
     ];
     final iters = scanIns.isEmpty ? 0 : scanIns.first.shape[inAxes.first];
     final nScanOut = body.output.length - nState;
@@ -1242,10 +1366,12 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return t.isFloat
             ? Tensor.float(
                 Float32List.sublistView(t.f!, i * rowLen, (i + 1) * rowLen),
-                shape)
+                shape,
+              )
             : Tensor.int64(
                 Int64List.sublistView(t.i!, i * rowLen, (i + 1) * rowLen),
-                shape);
+                shape,
+              );
       }
       return ops.opSqueeze(ops.opSlice(t, [i], [i + 1], [axis], null), [axis]);
     }
@@ -1253,8 +1379,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     for (int i = 0; i < iters; i++) {
       final sliced = [
         for (int j = 0; j < nScan; j++)
-          sliceAt(scanIns[j], inAxes[j],
-              inDirs != null && inDirs[j] == 1 ? iters - 1 - i : i)
+          sliceAt(
+            scanIns[j],
+            inAxes[j],
+            inDirs != null && inDirs[j] == 1 ? iters - 1 - i : i,
+          ),
       ];
       final outs = _execSubgraph(body, values, [...states, ...sliced], profile);
       states = outs.sublist(0, nState);
@@ -1273,22 +1402,24 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       final rank = steps.first.rank + 1;
       final ax = axis < 0 ? axis + rank : axis;
       return ops.opConcat([
-        for (final s in steps) ops.opUnsqueeze(s, [ax])
+        for (final s in steps) ops.opUnsqueeze(s, [ax]),
       ], ax);
     }
 
-    return [
-      ...states,
-      for (int k = 0; k < nScanOut; k++) stackOut(k),
-    ];
+    return [...states, for (int k = 0; k < nScanOut; k++) stackOut(k)];
   }
 
   /// `Loop` â€” inputs `[M?, cond?, v_1..v_N]`; body graph inputs
   /// `[iter, cond, v_1..v_N]`, outputs `[cond, v_1..v_N, scan_1..scan_K]`.
   /// Node outputs are the final `v` values, then each scan output stacked
   /// along a new leading axis.
-  List<Tensor> _runLoop(NodeProto node, List<Tensor?> ins, _AttrMap attrs,
-      Map<String, Tensor> values, ExecutionProfile? profile) {
+  List<Tensor> _runLoop(
+    NodeProto node,
+    List<Tensor?> ins,
+    _AttrMap attrs,
+    Map<String, Tensor> values,
+    ExecutionProfile? profile,
+  ) {
     final body = attrs.getGraph('body')!;
     final maxTrips = ins.isNotEmpty && ins[0] != null ? ins[0]!.getI(0) : null;
     bool cond = ins.length < 2 || ins[1] == null || ins[1]!.getI(0) != 0;
@@ -1299,11 +1430,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
 
     int iter = 0;
     while (cond && (maxTrips == null || iter < maxTrips)) {
-      final outs = _execSubgraph(
-          body,
-          values,
-          [Tensor.scalarInt(iter), Tensor.scalarInt(cond ? 1 : 0), ...carried],
-          profile);
+      final outs = _execSubgraph(body, values, [
+        Tensor.scalarInt(iter),
+        Tensor.scalarInt(cond ? 1 : 0),
+        ...carried,
+      ], profile);
       cond = outs[0].getI(0) != 0;
       carried = outs.sublist(1, 1 + nCarried);
       for (int k = 0; k < nScan; k++) {
@@ -1312,10 +1443,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       iter++;
     }
 
-    return [
-      ...carried,
-      for (final steps in scans) _stack(steps),
-    ];
+    return [...carried, for (final steps in scans) _stack(steps)];
   }
 
   /// Stacks per-iteration tensors along a new leading axis (scan outputs).
@@ -1327,20 +1455,30 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       final out = Float32List(steps.length * steps.first.length);
       for (int k = 0; k < steps.length; k++) {
         out.setRange(
-            k * steps.first.length, (k + 1) * steps.first.length, steps[k].f!);
+          k * steps.first.length,
+          (k + 1) * steps.first.length,
+          steps[k].f!,
+        );
       }
       return Tensor.float(out, shape);
     }
     final out = Int64List(steps.length * steps.first.length);
     for (int k = 0; k < steps.length; k++) {
-      out.setRange(k * steps.first.length, (k + 1) * steps.first.length,
-          steps[k].asIntList());
+      out.setRange(
+        k * steps.first.length,
+        (k + 1) * steps.first.length,
+        steps[k].asIntList(),
+      );
     }
     return Tensor.int64(out, shape);
   }
 
   Float32List? _convWorkspace(
-      NodeProto node, Tensor x, Tensor w, _AttrMap attrs) {
+    NodeProto node,
+    Tensor x,
+    Tensor w,
+    _AttrMap attrs,
+  ) {
     if (!x.isFloat || !w.isFloat || x.rank != 4 || w.rank != 4) return null;
     final cPerGroup = w.shape[1];
     final group = attrs.getInt('group') ?? 1;
@@ -1351,13 +1489,20 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     final pads = attrs.getInts('pads');
     final dilations = attrs.getInts('dilations');
     final autoPad = attrs.getString('auto_pad') ?? 'NOTSET';
-    final pointwise = kh == 1 &&
+    final pointwise =
+        kh == 1 &&
         kw == 1 &&
         (strides == null || (strides[0] == 1 && strides[1] == 1)) &&
         (pads == null || pads.every((v) => v == 0));
     if (pointwise) return null;
-    final out = nn.convOutputSpatial(x.shape.sublist(2), w.shape.sublist(2),
-        strides, pads, dilations, autoPad);
+    final out = nn.convOutputSpatial(
+      x.shape.sublist(2),
+      w.shape.sublist(2),
+      strides,
+      pads,
+      dilations,
+      autoPad,
+    );
     final needed = cPerGroup * kh * kw * out[0] * out[1];
     // A full im2col buffer is C·kh·kw·oh·ow floats — 14 GB for the 1024²
     // 384→128 3×3 convs. Cap the persistent workspace and let opConv chunk
@@ -1388,31 +1533,43 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [ops.opGlu(need(0), attrs.getInt('axis') ?? 0)];
       case '_FusedRMSNorm':
         return [
-          ops.opRMSNorm(need(0), need(1), attrs.getInt('axis')!,
-              attrs.getFloat('epsilon')!)
+          ops.opRMSNorm(
+            need(0),
+            need(1),
+            attrs.getInt('axis')!,
+            attrs.getFloat('epsilon')!,
+          ),
         ];
       case 'GroupQueryAttention':
         // Returns [output, present_key, present_value] â€” the present KV feeds
         // the next decode step's past_key/past_value.
-        return ops.opGroupQueryAttention(need(0), need(1), need(2),
-            numHeads: attrs.getInt('num_heads')!,
-            kvNumHeads: attrs.getInt('kv_num_heads')!,
-            scale: attrs.getFloat('scale'),
-            doRotary: (attrs.getInt('do_rotary') ?? 0) != 0,
-            rotaryInterleaved: (attrs.getInt('rotary_interleaved') ?? 0) != 0,
-            pastKey: ins.length > 3 ? ins[3] : null,
-            pastValue: ins.length > 4 ? ins[4] : null,
-            cosCache: ins.length > 7 ? ins[7] : null,
-            sinCache: ins.length > 8 ? ins[8] : null,
-            attentionBias: ins.length > 10 ? ins[10] : null,
-            softcap: attrs.getFloat('softcap') ?? 0,
-            localWindow: attrs.getInt('local_window_size') ?? -1);
+        return ops.opGroupQueryAttention(
+          need(0),
+          need(1),
+          need(2),
+          numHeads: attrs.getInt('num_heads')!,
+          kvNumHeads: attrs.getInt('kv_num_heads')!,
+          scale: attrs.getFloat('scale'),
+          doRotary: (attrs.getInt('do_rotary') ?? 0) != 0,
+          rotaryInterleaved: (attrs.getInt('rotary_interleaved') ?? 0) != 0,
+          pastKey: ins.length > 3 ? ins[3] : null,
+          pastValue: ins.length > 4 ? ins[4] : null,
+          cosCache: ins.length > 7 ? ins[7] : null,
+          sinCache: ins.length > 8 ? ins[8] : null,
+          attentionBias: ins.length > 10 ? ins[10] : null,
+          softcap: attrs.getFloat('softcap') ?? 0,
+          localWindow: attrs.getInt('local_window_size') ?? -1,
+        );
       case 'MultiHeadAttention':
         return [
           ops.opMultiHeadAttention(
-              need(0), need(1), need(2), ins.length > 5 ? ins[5] : null,
-              numHeads: attrs.getInt('num_heads')!,
-              scale: attrs.getFloat('scale'))
+            need(0),
+            need(1),
+            need(2),
+            ins.length > 5 ? ins[5] : null,
+            numHeads: attrs.getInt('num_heads')!,
+            scale: attrs.getFloat('scale'),
+          ),
         ];
       case 'RotaryEmbedding':
         if (canonicalOnnxDomain(node.domain).isEmpty) {
@@ -1429,10 +1586,15 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           ];
         }
         return [
-          ops.opRotaryEmbedding(need(0), need(1), need(2), need(3),
-              interleaved: (attrs.getInt('interleaved') ?? 0) != 0,
-              numHeads: attrs.getInt('num_heads') ?? 0,
-              rotaryEmbeddingDim: attrs.getInt('rotary_embedding_dim') ?? 0)
+          ops.opRotaryEmbedding(
+            need(0),
+            need(1),
+            need(2),
+            need(3),
+            interleaved: (attrs.getInt('interleaved') ?? 0) != 0,
+            numHeads: attrs.getInt('num_heads') ?? 0,
+            rotaryEmbeddingDim: attrs.getInt('rotary_embedding_dim') ?? 0,
+          ),
         ];
       case 'RMSNormalization':
         return [
@@ -1454,12 +1616,10 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 pvIn = ins.length > 5 ? ins[5] : null;
             // The cache is authoritative: the passed past tensors must be the
             // views this node produced earlier (or absent on the first step).
-            final kMatches = pkIn != null &&
-                identical(pkIn.f, cache.k) &&
-                pkIn.cacheView;
-            final vMatches = pvIn != null &&
-                identical(pvIn.f, cache.v) &&
-                pvIn.cacheView;
+            final kMatches =
+                pkIn != null && identical(pkIn.f, cache.k) && pkIn.cacheView;
+            final vMatches =
+                pvIn != null && identical(pvIn.f, cache.v) && pvIn.cacheView;
             if (kMatches == vMatches) {
               final out = standard.standardAttention(
                 need(0),
@@ -1517,15 +1677,23 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       case 'SimplifiedLayerNormalization':
         // com.microsoft RMSNorm: x * rsqrt(mean(x^2, axis) + eps) * scale.
         return [
-          ops.opRMSNorm(need(0), need(1), attrs.getInt('axis') ?? -1,
-              attrs.getFloat('epsilon') ?? 1e-5)
+          ops.opRMSNorm(
+            need(0),
+            need(1),
+            attrs.getInt('axis') ?? -1,
+            attrs.getFloat('epsilon') ?? 1e-5,
+          ),
         ];
       case 'SkipSimplifiedLayerNormalization':
         // Fused residual add + RMSNorm: inputs (x, skip, scale[, bias]);
         // outputs (rmsnorm(x+skip)[, mean, inv_std, x+skip]).
         final sum = ops.opAdd(need(0), need(1));
-        final normed =
-            ops.opRMSNorm(sum, need(2), -1, attrs.getFloat('epsilon') ?? 1e-5);
+        final normed = ops.opRMSNorm(
+          sum,
+          need(2),
+          -1,
+          attrs.getFloat('epsilon') ?? 1e-5,
+        );
         final withBias = ins.length > 3 && ins[3] != null
             ? ops.opAdd(normed, ins[3]!)
             : normed;
@@ -1538,7 +1706,12 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       case '_FusedSDPA':
         return [
           ops.opFusedSDPA(
-              need(0), need(1), need(2), need(3), attrs.getFloat('scale')!)
+            need(0),
+            need(1),
+            need(2),
+            need(3),
+            attrs.getFloat('scale')!,
+          ),
         ];
       case 'Add':
         return [ops.opAdd(need(0), need(1))];
@@ -1565,20 +1738,24 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         final minAttr = attrs.getFloat('min'), maxAttr = attrs.getFloat('max');
         return [
           ops.opClip(
-              need(0),
-              ins.length > 1 && ins[1] != null
-                  ? ins[1]
-                  : (minAttr != null ? Tensor.scalarFloat(minAttr) : null),
-              ins.length > 2 && ins[2] != null
-                  ? ins[2]
-                  : (maxAttr != null ? Tensor.scalarFloat(maxAttr) : null))
+            need(0),
+            ins.length > 1 && ins[1] != null
+                ? ins[1]
+                : (minAttr != null ? Tensor.scalarFloat(minAttr) : null),
+            ins.length > 2 && ins[2] != null
+                ? ins[2]
+                : (maxAttr != null ? Tensor.scalarFloat(maxAttr) : null),
+          ),
         ];
       case 'Cast':
         return [ops.opCast(need(0), attrs.getInt('to')!)];
       case 'Shape':
         return [
-          ops.opShape(need(0),
-              start: attrs.getInt('start'), end: attrs.getInt('end'))
+          ops.opShape(
+            need(0),
+            start: attrs.getInt('start'),
+            end: attrs.getInt('end'),
+          ),
         ];
       case 'Reshape':
         return [ops.opReshape(need(0), need(1))];
@@ -1586,29 +1763,32 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         // perm is optional: default reverses all axes.
         return [
           ops.opTranspose(
-              need(0),
-              attrs.getInts('perm') ??
-                  List.generate(need(0).rank, (k) => need(0).rank - 1 - k))
+            need(0),
+            attrs.getInts('perm') ??
+                List.generate(need(0).rank, (k) => need(0).rank - 1 - k),
+          ),
         ];
       case 'Squeeze':
         return [
           ops.opSqueeze(
-              need(0),
-              ins.length > 1 && ins[1] != null
-                  ? ins[1]!.asIntList()
-                  : attrs.getInts('axes'))
+            need(0),
+            ins.length > 1 && ins[1] != null
+                ? ins[1]!.asIntList()
+                : attrs.getInts('axes'),
+          ),
         ];
       case 'Unsqueeze':
         return [
           ops.opUnsqueeze(
-              need(0),
-              ins.length > 1 && ins[1] != null
-                  ? ins[1]!.asIntList()
-                  : attrs.getInts('axes')!)
+            need(0),
+            ins.length > 1 && ins[1] != null
+                ? ins[1]!.asIntList()
+                : attrs.getInts('axes')!,
+          ),
         ];
       case 'Concat':
         return [
-          ops.opConcat([for (final t in ins) t!], attrs.getInt('axis')!)
+          ops.opConcat([for (final t in ins) t!], attrs.getInt('axis')!),
         ];
       case 'Gather':
         if (_deferredTables.containsKey(node.input[0])) {
@@ -1617,7 +1797,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [ops.opGather(need(0), need(1), attrs.getInt('axis') ?? 0)];
       case 'GatherND':
         return [
-          ops.opGatherND(need(0), need(1), attrs.getInt('batch_dims') ?? 0)
+          ops.opGatherND(need(0), need(1), attrs.getInt('batch_dims') ?? 0),
         ];
       case 'Expand':
         return [ops.opExpand(need(0), need(1))];
@@ -1626,8 +1806,13 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         // attributes (no steps).
         if (ins.length == 1) {
           return [
-            ops.opSlice(need(0), attrs.getInts('starts')!,
-                attrs.getInts('ends')!, attrs.getInts('axes'), null)
+            ops.opSlice(
+              need(0),
+              attrs.getInts('starts')!,
+              attrs.getInts('ends')!,
+              attrs.getInts('axes'),
+              null,
+            ),
           ];
         }
         return [
@@ -1637,7 +1822,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             ins[2]!.asIntList(),
             ins.length > 3 && ins[3] != null ? ins[3]!.asIntList() : null,
             ins.length > 4 && ins[4] != null ? ins[4]!.asIntList() : null,
-          )
+          ),
         ];
       case 'ReduceMean':
         return [
@@ -1647,7 +1832,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 ? ins[1]!.asIntList()
                 : attrs.getInts('axes'),
             (attrs.getInt('keepdims') ?? 1) != 0,
-          )
+          ),
         ];
       case 'Softmax':
       case 'LogSoftmax':
@@ -1676,7 +1861,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             need(2),
             attrs.getInt('axis') ?? -1,
             attrs.getFloat('epsilon') ?? 1e-5,
-          )
+          ),
         ];
       case 'MatMul':
         return [ops.opMatMul(need(0), need(1))];
@@ -1696,11 +1881,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             beta: attrs.getFloat('beta') ?? 1.0,
             transA: (attrs.getInt('transA') ?? 0) != 0,
             transB: transB,
-          )
+          ),
         ];
       case 'Einsum':
         return [
-          ops.opEinsum(attrs.getString('equation')!, [for (final t in ins) t!])
+          ops.opEinsum(attrs.getString('equation')!, [for (final t in ins) t!]),
         ];
       // --- extended op set ---
       case 'Constant':
@@ -1714,7 +1899,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             attrs.getFloat('low') ?? 0.0,
             attrs.getFloat('high') ?? 1.0,
             attrs.getFloat('seed')?.toInt(),
-          )
+          ),
         ];
       case 'Range':
         return [ops.opRange(need(0), need(1), need(2))];
@@ -1740,9 +1925,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [ops.opIsNaN(need(0))];
       case 'IsInf':
         return [
-          ops.opIsInf(need(0),
-              detectPositive: (attrs.getInt('detect_positive') ?? 1) != 0,
-              detectNegative: (attrs.getInt('detect_negative') ?? 1) != 0)
+          ops.opIsInf(
+            need(0),
+            detectPositive: (attrs.getInt('detect_positive') ?? 1) != 0,
+            detectNegative: (attrs.getInt('detect_negative') ?? 1) != 0,
+          ),
         ];
       case 'Equal':
         return [ops.opEqual(need(0), need(1))];
@@ -1760,17 +1947,17 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [ops.opOr(need(0), need(1))];
       case 'Max':
         return [
-          ops.opMax([for (final t in ins) t!])
+          ops.opMax([for (final t in ins) t!]),
         ];
       case 'Min':
         return [
-          ops.opMin([for (final t in ins) t!])
+          ops.opMin([for (final t in ins) t!]),
         ];
       case 'Where':
         return [ops.opWhere(need(0), need(1), need(2))];
       case 'OneHot':
         return [
-          ops.opOneHot(need(0), need(1), need(2), attrs.getInt('axis') ?? -1)
+          ops.opOneHot(need(0), need(1), need(2), attrs.getInt('axis') ?? -1),
         ];
       case 'ReduceSum':
         return [
@@ -1780,7 +1967,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 ? ins[1]!.asIntList()
                 : attrs.getInts('axes'),
             (attrs.getInt('keepdims') ?? 1) != 0,
-          )
+          ),
         ];
       case 'ReduceSumSquare':
         return [
@@ -1790,7 +1977,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 ? ins[1]!.asIntList()
                 : attrs.getInts('axes'),
             (attrs.getInt('keepdims') ?? 1) != 0,
-          )
+          ),
         ];
       case 'ReduceL2':
         return [
@@ -1800,7 +1987,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 ? ins[1]!.asIntList()
                 : attrs.getInts('axes'),
             (attrs.getInt('keepdims') ?? 1) != 0,
-          )
+          ),
         ];
       case 'Split':
         // Opset 13+ takes split sizes as an input; opset 11 as an attribute.
@@ -1820,7 +2007,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             ins.length > 2 ? ins[2] : null,
             ins.length > 3 && ins[3] != null ? ins[3]!.getI(0) : null,
             onesided: (attrs.getInt('onesided') ?? 1) != 0,
-          )
+          ),
         ];
       case 'ReduceProd':
         return [
@@ -1830,7 +2017,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 ? ins[1]!.asIntList()
                 : attrs.getInts('axes'),
             (attrs.getInt('keepdims') ?? 1) != 0,
-          )
+          ),
         ];
       case 'ReduceMax':
       case 'ReduceMin':
@@ -1842,17 +2029,20 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 : attrs.getInts('axes'),
             (attrs.getInt('keepdims') ?? 1) != 0,
             isMax: node.opType == 'ReduceMax',
-          )
+          ),
         ];
       case 'CumSum':
         return [
-          ops.opCumSum(need(0), need(1).getI(0),
-              exclusive: (attrs.getInt('exclusive') ?? 0) != 0,
-              reverse: (attrs.getInt('reverse') ?? 0) != 0)
+          ops.opCumSum(
+            need(0),
+            need(1).getI(0),
+            exclusive: (attrs.getInt('exclusive') ?? 0) != 0,
+            reverse: (attrs.getInt('reverse') ?? 0) != 0,
+          ),
         ];
       case 'GatherElements':
         return [
-          ops.opGatherElements(need(0), need(1), attrs.getInt('axis') ?? 0)
+          ops.opGatherElements(need(0), need(1), attrs.getInt('axis') ?? 0),
         ];
       // --- convolution / pooling / normalization family ---
       case 'Conv':
@@ -1869,20 +2059,21 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         final convStrides = attrs.getInts('strides');
         final convPads = attrs.getInts('pads');
         final convDilations = attrs.getInts('dilations');
-        final useWinograd = need(0).rank == 4 &&
-            !(_pool?.convWeights.contains(node.input[1]) ?? false) &&
+        final useWinograd =
+            need(0).rank == 4 &&
             _initializers.containsKey(node.input[1]) &&
             !_graph.input.any((input) => input.name == node.input[1]) &&
             convW.isFloat &&
             convW.rank == 4 &&
-            convW.shape[2] == 3 &&
-            convW.shape[3] == 3 &&
-            (attrs.getInt('group') ?? 1) == 1 &&
-            (convStrides == null || convStrides.every((v) => v == 1)) &&
-            (convDilations == null || convDilations.every((v) => v == 1)) &&
-            convPads != null &&
-            convPads.length == 4 &&
-            convPads.every((v) => v == 1);
+            nn.convWinogradEligible(
+              wShape: convW.shape,
+              inShape: need(0).shape,
+              strides: convStrides,
+              pads: convPads,
+              dilations: convDilations,
+              group: attrs.getInt('group') ?? 1,
+              autoPad: attrs.getString('auto_pad') ?? 'NOTSET',
+            );
         return [
           nn.opConv(
             need(0),
@@ -1893,42 +2084,48 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             dilations: convDilations,
             group: attrs.getInt('group') ?? 1,
             autoPad: attrs.getString('auto_pad') ?? 'NOTSET',
-            workspace:
-                useWinograd ? null : _convWorkspace(node, need(0), need(1), attrs),
+            workspace: useWinograd
+                ? null
+                : _convWorkspace(node, need(0), need(1), attrs),
             winogradPlan: useWinograd
                 ? _winogradPlans.putIfAbsent(
                     node,
-                    () => nn.pretransformWinogradF2x2(convW,
-                        narrowDirectGemm: experiments
-                            .contains(OnnxExperiment.narrowDirectGemm)))
+                    () => nn.pretransformWinogradF2x2(
+                      convW,
+                      narrowDirectGemm: experiments.contains(
+                        OnnxExperiment.narrowDirectGemm,
+                      ),
+                    ),
+                  )
                 : null,
-          )
+          ),
         ];
-      case 'ConvTranspose': {
-        final convTW = need(1);
-        final declaredKernelShape = attrs.getInts('kernel_shape');
-        final weightKernelShape = convTW.shape.sublist(2);
-        if (declaredKernelShape != null &&
-            declaredKernelShape.toString() != weightKernelShape.toString()) {
-          throw StateError(
-            'ConvTranspose kernel_shape $declaredKernelShape does not match '
-            'weight shape $weightKernelShape.',
-          );
+      case 'ConvTranspose':
+        {
+          final convTW = need(1);
+          final declaredKernelShape = attrs.getInts('kernel_shape');
+          final weightKernelShape = convTW.shape.sublist(2);
+          if (declaredKernelShape != null &&
+              declaredKernelShape.toString() != weightKernelShape.toString()) {
+            throw StateError(
+              'ConvTranspose kernel_shape $declaredKernelShape does not match '
+              'weight shape $weightKernelShape.',
+            );
+          }
+          return [
+            nn.opConvTranspose(
+              need(0),
+              convTW,
+              ins.length > 2 ? ins[2] : null,
+              strides: attrs.getInts('strides'),
+              pads: attrs.getInts('pads'),
+              dilations: attrs.getInts('dilations'),
+              outputPadding: attrs.getInts('output_padding'),
+              outputShape: attrs.getInts('output_shape'),
+              group: attrs.getInt('group') ?? 1,
+            ),
+          ];
         }
-        return [
-          nn.opConvTranspose(
-            need(0),
-            convTW,
-            ins.length > 2 ? ins[2] : null,
-            strides: attrs.getInts('strides'),
-            pads: attrs.getInts('pads'),
-            dilations: attrs.getInts('dilations'),
-            outputPadding: attrs.getInts('output_padding'),
-            outputShape: attrs.getInts('output_shape'),
-            group: attrs.getInt('group') ?? 1,
-          )
-        ];
-      }
       case 'MaxPool':
         return [
           nn.opMaxPool(
@@ -1939,7 +2136,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             dilations: attrs.getInts('dilations'),
             autoPad: attrs.getString('auto_pad') ?? 'NOTSET',
             ceilMode: (attrs.getInt('ceil_mode') ?? 0) != 0,
-          )
+          ),
         ];
       case 'AveragePool':
         return [
@@ -1951,7 +2148,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             autoPad: attrs.getString('auto_pad') ?? 'NOTSET',
             ceilMode: (attrs.getInt('ceil_mode') ?? 0) != 0,
             countIncludePad: (attrs.getInt('count_include_pad') ?? 0) != 0,
-          )
+          ),
         ];
       case 'GlobalAveragePool':
         return [nn.opGlobalPool(need(0), isMax: false)];
@@ -1959,52 +2156,79 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [nn.opGlobalPool(need(0), isMax: true)];
       case 'BatchNormalization':
         return [
-          nn.opBatchNormalization(need(0), need(1), need(2), need(3), need(4),
-              attrs.getFloat('epsilon') ?? 1e-5)
+          nn.opBatchNormalization(
+            need(0),
+            need(1),
+            need(2),
+            need(3),
+            need(4),
+            attrs.getFloat('epsilon') ?? 1e-5,
+          ),
         ];
       case 'GroupNormalization':
         return [
-          nn.opGroupNormalization(need(0), need(1), need(2),
-              attrs.getInt('num_groups')!, attrs.getFloat('epsilon') ?? 1e-5)
+          nn.opGroupNormalization(
+            need(0),
+            need(1),
+            need(2),
+            attrs.getInt('num_groups')!,
+            attrs.getFloat('epsilon') ?? 1e-5,
+          ),
         ];
       case 'GridSample':
         return [
-          nn.opGridSample(need(0), need(1),
-              mode: attrs.getString('mode') ?? 'linear',
-              paddingMode: attrs.getString('padding_mode') ?? 'zeros',
-              alignCorners: (attrs.getInt('align_corners') ?? 0) != 0)
+          nn.opGridSample(
+            need(0),
+            need(1),
+            mode: attrs.getString('mode') ?? 'linear',
+            paddingMode: attrs.getString('padding_mode') ?? 'zeros',
+            alignCorners: (attrs.getInt('align_corners') ?? 0) != 0,
+          ),
         ];
       case 'RoiAlign':
         return [
-          nn.opRoiAlign(need(0), need(1), need(2),
-              outH: attrs.getInt('output_height') ?? 1,
-              outW: attrs.getInt('output_width') ?? 1,
-              spatialScale: attrs.getFloat('spatial_scale') ?? 1.0,
-              samplingRatio: attrs.getInt('sampling_ratio') ?? 0,
-              isMax: attrs.getString('mode') == 'max',
-              // Opset < 16 has no such attribute and behaves as
-              // output_half_pixel (no -0.5 shift).
-              halfPixel: (attrs.getString('coordinate_transformation_mode') ??
-                      (_opset >= 16 ? 'half_pixel' : 'output_half_pixel')) ==
-                  'half_pixel')
+          nn.opRoiAlign(
+            need(0),
+            need(1),
+            need(2),
+            outH: attrs.getInt('output_height') ?? 1,
+            outW: attrs.getInt('output_width') ?? 1,
+            spatialScale: attrs.getFloat('spatial_scale') ?? 1.0,
+            samplingRatio: attrs.getInt('sampling_ratio') ?? 0,
+            isMax: attrs.getString('mode') == 'max',
+            // Opset < 16 has no such attribute and behaves as
+            // output_half_pixel (no -0.5 shift).
+            halfPixel:
+                (attrs.getString('coordinate_transformation_mode') ??
+                    (_opset >= 16 ? 'half_pixel' : 'output_half_pixel')) ==
+                'half_pixel',
+          ),
         ];
       case 'ArgMax':
       case 'ArgMin':
         return [
-          ops.opArgMinMax(need(0), attrs.getInt('axis') ?? 0,
-              (attrs.getInt('keepdims') ?? 1) != 0,
-              isMax: node.opType == 'ArgMax',
-              selectLastIndex: (attrs.getInt('select_last_index') ?? 0) != 0)
+          ops.opArgMinMax(
+            need(0),
+            attrs.getInt('axis') ?? 0,
+            (attrs.getInt('keepdims') ?? 1) != 0,
+            isMax: node.opType == 'ArgMax',
+            selectLastIndex: (attrs.getInt('select_last_index') ?? 0) != 0,
+          ),
         ];
       case 'InstanceNormalization':
         return [
           nn.opInstanceNormalization(
-              need(0), need(1), need(2), attrs.getFloat('epsilon') ?? 1e-5)
+            need(0),
+            need(1),
+            need(2),
+            attrs.getFloat('epsilon') ?? 1e-5,
+          ),
         ];
       case 'Resize':
         // Opset 10: (X, scales). Opset 11+: (X, roi, scales, sizes).
-        final scalesT =
-            ins.length == 2 ? ins[1] : (ins.length > 2 ? ins[2] : null);
+        final scalesT = ins.length == 2
+            ? ins[1]
+            : (ins.length > 2 ? ins[2] : null);
         final sizesT = ins.length > 3 ? ins[3] : null;
         return [
           nn.opResize(
@@ -2014,11 +2238,12 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 : scalesT.asFloatList().toList(),
             sizes: sizesT?.asIntList().toList(),
             mode: attrs.getString('mode') ?? 'nearest',
-            coordMode: attrs.getString('coordinate_transformation_mode') ??
+            coordMode:
+                attrs.getString('coordinate_transformation_mode') ??
                 'half_pixel',
             nearestMode:
                 attrs.getString('nearest_mode') ?? 'round_prefer_floor',
-          )
+          ),
         ];
       case 'Flatten':
         return [nn.opFlatten(need(0), attrs.getInt('axis') ?? 1)];
@@ -2034,7 +2259,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             mode: attrs.getString('mode') ?? 'nearest',
             coordMode: 'asymmetric',
             nearestMode: 'floor',
-          )
+          ),
         ];
       case 'Dropout':
         // Inference: identity; the optional mask output is all-true.
@@ -2042,8 +2267,9 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
           need(0),
           if (node.output.length > 1 && node.output[1].isNotEmpty)
             Tensor.int64(
-                Int64List(need(0).length)..fillRange(0, need(0).length, 1),
-                need(0).shape),
+              Int64List(need(0).length)..fillRange(0, need(0).length, 1),
+              need(0).shape,
+            ),
         ];
       case 'LeakyRelu':
         return [ops.opLeakyRelu(need(0), attrs.getFloat('alpha') ?? 0.01)];
@@ -2051,8 +2277,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [ops.opElu(need(0), attrs.getFloat('alpha') ?? 1.0)];
       case 'HardSigmoid':
         return [
-          ops.opHardSigmoid(need(0), attrs.getFloat('alpha') ?? 0.2,
-              attrs.getFloat('beta') ?? 0.5)
+          ops.opHardSigmoid(
+            need(0),
+            attrs.getFloat('alpha') ?? 0.2,
+            attrs.getFloat('beta') ?? 0.5,
+          ),
         ];
       case 'HardSwish':
         return [ops.opHardSwish(need(0))];
@@ -2070,8 +2299,10 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [ops.opRound(need(0))];
       case 'Gelu':
         return [
-          ops.opGelu(need(0),
-              tanhApprox: attrs.getString('approximate') == 'tanh')
+          ops.opGelu(
+            need(0),
+            tanhApprox: attrs.getString('approximate') == 'tanh',
+          ),
         ];
       case 'PRelu':
         return [ops.opPRelu(need(0), need(1))];
@@ -2079,40 +2310,50 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         return [ops.opSize(need(0))];
       case 'RandomNormalLike':
         return [
-          ops.opRandomNormalFill(need(0).shape, attrs.getFloat('mean') ?? 0.0)
+          ops.opRandomNormalFill(need(0).shape, attrs.getFloat('mean') ?? 0.0),
         ];
       case 'RandomNormal':
         return [
           ops.opRandomNormalFill(
-              attrs.getInts('shape')!, attrs.getFloat('mean') ?? 0.0)
+            attrs.getInts('shape')!,
+            attrs.getFloat('mean') ?? 0.0,
+          ),
         ];
       case 'Tile':
         return [ops.opTile(need(0), need(1).asIntList().toList())];
       case 'NonZero':
         return [ops.opNonZero(need(0))];
       case 'TopK':
-        return ops.opTopK(need(0), need(1).getI(0),
-            axis: attrs.getInt('axis') ?? -1,
-            largest: (attrs.getInt('largest') ?? 1) != 0);
+        return ops.opTopK(
+          need(0),
+          need(1).getI(0),
+          axis: attrs.getInt('axis') ?? -1,
+          largest: (attrs.getInt('largest') ?? 1) != 0,
+        );
       case 'NonMaxSuppression':
         return [
           ops.opNonMaxSuppression(
             need(0),
             need(1),
-            maxOutputBoxesPerClass:
-                ins.length > 2 && ins[2] != null ? ins[2]!.getI(0) : 0,
-            iouThreshold:
-                ins.length > 3 && ins[3] != null ? ins[3]!.getD(0) : 0,
-            scoreThreshold:
-                ins.length > 4 && ins[4] != null ? ins[4]!.getD(0) : null,
+            maxOutputBoxesPerClass: ins.length > 2 && ins[2] != null
+                ? ins[2]!.getI(0)
+                : 0,
+            iouThreshold: ins.length > 3 && ins[3] != null
+                ? ins[3]!.getD(0)
+                : 0,
+            scoreThreshold: ins.length > 4 && ins[4] != null
+                ? ins[4]!.getD(0)
+                : null,
             centerPointBox: (attrs.getInt('center_point_box') ?? 0) != 0,
-          )
+          ),
         ];
       case 'Trilu':
         return [
-          ops.opTrilu(need(0),
-              upper: (attrs.getInt('upper') ?? 1) != 0,
-              k: ins.length > 1 && ins[1] != null ? ins[1]!.getI(0) : 0)
+          ops.opTrilu(
+            need(0),
+            upper: (attrs.getInt('upper') ?? 1) != 0,
+            k: ins.length > 1 && ins[1] != null ? ins[1]!.getI(0) : 0,
+          ),
         ];
       case 'ScatterND':
         if ((attrs.getString('reduction') ?? 'none') != 'none') {
@@ -2125,39 +2366,63 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         final int8 =
             node.input.length > 2 && _initializerElemType[node.input[2]] == 3;
         return [
-          ops.opQuantizeLinear(need(0), need(1), ins.length > 2 ? ins[2] : null,
-              axis: attrs.getInt('axis') ?? 1,
-              lo: int8 ? -128 : 0,
-              hi: int8 ? 127 : 255)
+          ops.opQuantizeLinear(
+            need(0),
+            need(1),
+            ins.length > 2 ? ins[2] : null,
+            axis: attrs.getInt('axis') ?? 1,
+            lo: int8 ? -128 : 0,
+            hi: int8 ? 127 : 255,
+          ),
         ];
       case 'DequantizeLinear':
         return [
           ops.opDequantizeLinear(
-              need(0), need(1), ins.length > 2 ? ins[2] : null,
-              axis: attrs.getInt('axis') ?? 1)
+            need(0),
+            need(1),
+            ins.length > 2 ? ins[2] : null,
+            axis: attrs.getInt('axis') ?? 1,
+          ),
         ];
       case 'DynamicQuantizeLinear':
         return ops.opDynamicQuantizeLinear(need(0));
       case 'MatMulInteger':
         return [
-          ql.opMatMulInteger(need(0), need(1), ins.length > 2 ? ins[2] : null,
-              ins.length > 3 ? ins[3] : null)
+          ql.opMatMulInteger(
+            need(0),
+            need(1),
+            ins.length > 2 ? ins[2] : null,
+            ins.length > 3 ? ins[3] : null,
+          ),
         ];
       case 'ConvInteger':
         return [
-          ql.opConvInteger(need(0), need(1), ins.length > 2 ? ins[2] : null,
-              ins.length > 3 ? ins[3] : null,
-              strides: attrs.getInts('strides'),
-              pads: attrs.getInts('pads'),
-              dilations: attrs.getInts('dilations'),
-              group: attrs.getInt('group') ?? 1)
+          ql.opConvInteger(
+            need(0),
+            need(1),
+            ins.length > 2 ? ins[2] : null,
+            ins.length > 3 ? ins[3] : null,
+            strides: attrs.getInts('strides'),
+            pads: attrs.getInts('pads'),
+            dilations: attrs.getInts('dilations'),
+            group: attrs.getInt('group') ?? 1,
+          ),
         ];
       case 'QLinearMatMul':
         final qmInt8 = _initializerElemType[node.input[7]] == 3;
         return [
-          ql.opQLinearMatMul(need(0), need(1), ins[2], need(3), need(4), ins[5],
-              need(6), ins.length > 7 ? ins[7] : null,
-              lo: qmInt8 ? -128 : 0, hi: qmInt8 ? 127 : 255)
+          ql.opQLinearMatMul(
+            need(0),
+            need(1),
+            ins[2],
+            need(3),
+            need(4),
+            ins[5],
+            need(6),
+            ins.length > 7 ? ins[7] : null,
+            lo: qmInt8 ? -128 : 0,
+            hi: qmInt8 ? 127 : 255,
+          ),
         ];
       case 'MatMulNBits':
         if (node.input.length > 4 && node.input[4].isNotEmpty) {
@@ -2165,32 +2430,37 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         }
         return [
           ql.opMatMulNBits(
-              need(0), need(1), need(2), ins.length > 3 ? ins[3] : null,
-              k: attrs.getInt('K')!,
-              n: attrs.getInt('N')!,
-              bits: attrs.getInt('bits') ?? 4,
-              bias: ins.length > 5 ? ins[5] : null,
-              blockSize: attrs.getInt('block_size')!)
+            need(0),
+            need(1),
+            need(2),
+            ins.length > 3 ? ins[3] : null,
+            k: attrs.getInt('K')!,
+            n: attrs.getInt('N')!,
+            bits: attrs.getInt('bits') ?? 4,
+            bias: ins.length > 5 ? ins[5] : null,
+            blockSize: attrs.getInt('block_size')!,
+          ),
         ];
       case 'QLinearConv':
         final qcInt8 = _initializerElemType[node.input[7]] == 3;
         return [
           ql.opQLinearConv(
-              need(0),
-              need(1),
-              ins[2],
-              need(3),
-              need(4),
-              ins[5],
-              need(6),
-              ins.length > 7 ? ins[7] : null,
-              ins.length > 8 ? ins[8] : null,
-              strides: attrs.getInts('strides'),
-              pads: attrs.getInts('pads'),
-              dilations: attrs.getInts('dilations'),
-              group: attrs.getInt('group') ?? 1,
-              lo: qcInt8 ? -128 : 0,
-              hi: qcInt8 ? 127 : 255)
+            need(0),
+            need(1),
+            ins[2],
+            need(3),
+            need(4),
+            ins[5],
+            need(6),
+            ins.length > 7 ? ins[7] : null,
+            ins.length > 8 ? ins[8] : null,
+            strides: attrs.getInts('strides'),
+            pads: attrs.getInts('pads'),
+            dilations: attrs.getInts('dilations'),
+            group: attrs.getInt('group') ?? 1,
+            lo: qcInt8 ? -128 : 0,
+            hi: qcInt8 ? 127 : 255,
+          ),
         ];
       case 'Pad':
         // Opset 11+ takes pads/value/axes as inputs; opset 2 as attributes.
@@ -2208,7 +2478,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             axes: ins.length > 3 && ins[3] != null
                 ? ins[3]!.asIntList().toList()
                 : null,
-          )
+          ),
         ];
       // --- recurrent family ---
       case 'LSTM':
@@ -2255,7 +2525,8 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         );
       default:
         throw UnsupportedError(
-            'ONNX op "${node.opType}" not implemented in the Dart interpreter');
+          'ONNX op "${node.opType}" not implemented in the Dart interpreter',
+        );
     }
   }
 }
@@ -2346,7 +2617,9 @@ class _AttrMap {
     if (attr == null) return null;
     if (!cacheDecoded) return attr.ints.map((v) => v.toInt()).toList();
     return _intsCache.putIfAbsent(
-        name, () => attr.ints.map((v) => v.toInt()).toList());
+      name,
+      () => attr.ints.map((v) => v.toInt()).toList(),
+    );
   }
 
   List<double>? getFloats(String name) {
@@ -2363,7 +2636,9 @@ class _AttrMap {
       return attr.strings.map((s) => String.fromCharCodes(s)).toList();
     }
     return _stringsCache.putIfAbsent(
-        name, () => attr.strings.map((s) => String.fromCharCodes(s)).toList());
+      name,
+      () => attr.strings.map((s) => String.fromCharCodes(s)).toList(),
+    );
   }
 
   GraphProto? getGraph(String name) =>
@@ -2373,7 +2648,7 @@ class _AttrMap {
   /// `value`), or null if absent.
   Tensor? getTensor(String name) => _byName.containsKey(name)
       ? (_decodedTensors[_byName[name]!.t] ??
-          tensorFromProto(_byName[name]!.t, ext: _ext))
+            tensorFromProto(_byName[name]!.t, ext: _ext))
       : null;
 
   /// The value produced by a `Constant` node â€” either a `value` tensor or one
@@ -2386,8 +2661,9 @@ class _AttrMap {
     final ints = _byName['value_ints'];
     if (ints != null) {
       return Tensor.int64(
-          Int64List.fromList(ints.ints.map((v) => v.toInt()).toList()),
-          [ints.ints.length]);
+        Int64List.fromList(ints.ints.map((v) => v.toInt()).toList()),
+        [ints.ints.length],
+      );
     }
     final i = _byName['value_int'];
     if (i != null) {
@@ -2395,8 +2671,9 @@ class _AttrMap {
     }
     final floats = _byName['value_floats'];
     if (floats != null) {
-      return Tensor.float(
-          Float32List.fromList(floats.floats), [floats.floats.length]);
+      return Tensor.float(Float32List.fromList(floats.floats), [
+        floats.floats.length,
+      ]);
     }
     final f = _byName['value_float'];
     if (f != null) {

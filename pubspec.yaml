@@ -9,7 +9,7 @@ topics:
   - transformer
 
 environment:
-  sdk: ^3.5.0
+  sdk: ^3.13.5
 
 dependencies:
   protobuf: ^6.0.0

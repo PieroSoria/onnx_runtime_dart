@@ -198,7 +198,9 @@ Convolutions stay on the main isolate by default because they already use
 cached SIMD GEMM. Pass `poolConv: true` for large activation maps (e.g. 1024²
 inpainting): conv output rows, banded `ConvTranspose`, and runtime MatMul
 batches are fanned out with row-band slicing, and all results remain
-bitwise-identical to `run()`. Per-node timings are available through
+bitwise-identical to `run()`. 3×3 convs use Winograd tiles, and each conv's
+kernel is shipped with its request (not replicated to every worker), keeping
+memory bounded for large models. Per-node timings are available through
 `profile.nodesReport()` after an `ExecutionProfile` run.
 
 ## Install

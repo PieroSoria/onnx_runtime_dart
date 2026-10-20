@@ -10,7 +10,8 @@ library;
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'gemm_kernel_scalar.dart' if (dart.library.ffi) 'gemm_kernel_simd.dart'
+import 'gemm_kernel_scalar.dart'
+    if (dart.library.ffi) 'gemm_kernel_simd.dart'
     as gemm;
 import 'tensor.dart';
 
@@ -52,8 +53,10 @@ Float32List _convScratch = Float32List(0);
       case 'SAME_UPPER':
       case 'SAME_LOWER':
         out[k] = (inDims[k] + strides[k] - 1) ~/ strides[k];
-        final total =
-            math.max(0, (out[k] - 1) * strides[k] + window - inDims[k]);
+        final total = math.max(
+          0,
+          (out[k] - 1) * strides[k] + window - inDims[k],
+        );
         final small = total ~/ 2;
         // SAME_UPPER puts the extra padding at the end, SAME_LOWER at the
         // beginning.
@@ -65,7 +68,8 @@ Float32List _convScratch = Float32List(0);
         p[k] = pads == null ? 0 : pads[k];
         p[nd + k] = pads == null ? 0 : pads[nd + k];
         final span = inDims[k] + p[k] + p[nd + k] - window;
-        out[k] = (ceilMode
+        out[k] =
+            (ceilMode
                 ? (span + strides[k] - 1) ~/ strides[k]
                 : span ~/ strides[k]) +
             1;
@@ -92,16 +96,23 @@ int _roundEvenNn(double v) {
 
 /// Output spatial dims for a Conv with these parameters (used by the
 /// executor to plan the isolate-pool band split without running the conv).
-List<int> convOutputSpatial(List<int> inSp, List<int> kernel,
-    List<int>? strides, List<int>? pads, List<int>? dilations, String autoPad) {
+List<int> convOutputSpatial(
+  List<int> inSp,
+  List<int> kernel,
+  List<int>? strides,
+  List<int>? pads,
+  List<int>? dilations,
+  String autoPad,
+) {
   final nd = inSp.length;
   final (_, outSp) = _resolvePads(
-      inDims: inSp,
-      kernel: kernel,
-      strides: strides ?? List.filled(nd, 1),
-      dilations: dilations ?? List.filled(nd, 1),
-      autoPad: autoPad,
-      pads: pads);
+    inDims: inSp,
+    kernel: kernel,
+    strides: strides ?? List.filled(nd, 1),
+    dilations: dilations ?? List.filled(nd, 1),
+    autoPad: autoPad,
+    pads: pads,
+  );
   return outSp;
 }
 
@@ -149,8 +160,7 @@ List<int> convOutputSpatial(List<int> inSp, List<int> kernel,
 }) {
   if (inH <= 0) return (0, 0);
   // ceil((bandStart + padTop - (kernelH - 1)·dilation) / stride)
-  final rawStart =
-      bandStart + padTop - (kernelH - 1) * dilation;
+  final rawStart = bandStart + padTop - (kernelH - 1) * dilation;
   var start = -((-rawStart) ~/ stride);
   var end = (bandEnd - 1 + padTop) ~/ stride;
   if (start < 0) start = 0;
@@ -184,7 +194,9 @@ Tensor opConv(
 }) {
   final nd = x.rank - 2;
   assert(
-      nd >= 1 && nd <= 3, 'Conv supports 1-3 spatial dims, got rank ${x.rank}');
+    nd >= 1 && nd <= 3,
+    'Conv supports 1-3 spatial dims, got rank ${x.rank}',
+  );
   assert(w.rank == x.rank, 'Conv weight rank must match input rank');
   if (nd == 1) {
     // 1-D convs ride the 2-D im2col/GEMM machinery (the generic N-D path
@@ -204,19 +216,22 @@ Tensor opConv(
   }
   final n = x.shape[0], cIn = x.shape[1];
   final m = w.shape[0], cPerGroup = w.shape[1];
-  assert(cIn == cPerGroup * group,
-      'Conv channel mismatch: input C=$cIn, weight C/g=$cPerGroup, group=$group');
+  assert(
+    cIn == cPerGroup * group,
+    'Conv channel mismatch: input C=$cIn, weight C/g=$cPerGroup, group=$group',
+  );
   final inSp = x.shape.sublist(2);
   final kernel = w.shape.sublist(2);
   final s = strides ?? List.filled(nd, 1);
   final d = dilations ?? List.filled(nd, 1);
   final (p, outSp) = _resolvePads(
-      inDims: inSp,
-      kernel: kernel,
-      strides: s,
-      dilations: d,
-      autoPad: autoPad,
-      pads: pads);
+    inDims: inSp,
+    kernel: kernel,
+    strides: s,
+    dilations: d,
+    autoPad: autoPad,
+    pads: pads,
+  );
 
   final xf = x.asFloatList(), wf = w.asFloatList();
   final bf = bias?.asFloatList();
@@ -224,11 +239,15 @@ Tensor opConv(
   // Output-row band (2-D only): the isolate pool splits a conv by output
   // rows; each call computes rows [b0, b1) and returns that slab.
   final b0 = bandStart ?? 0;
-  assert(nd == 2 || (bandStart == null && bandEnd == null),
-      'Conv banding is only supported for 2-D convs');
-  final out = Float32List(nd == 2
-      ? n * m * ((bandEnd ?? outSp[0]) - b0) * outSp[1]
-      : n * m * _prod(outSp));
+  assert(
+    nd == 2 || (bandStart == null && bandEnd == null),
+    'Conv banding is only supported for 2-D convs',
+  );
+  final out = Float32List(
+    nd == 2
+        ? n * m * ((bandEnd ?? outSp[0]) - b0) * outSp[1]
+        : n * m * _prod(outSp),
+  );
 
   if (nd == 2) {
     final h = inSp[0], wd = inSp[1];
@@ -244,8 +263,10 @@ Tensor opConv(
     // Depthwise (1 in / 1 out channel per group): im2col+GEMM degenerates to
     // m=1 matmuls where packing dominates — the direct loop wins.
     final depthwise = cPerGroup == 1 && mPerGroup == 1;
-    assert(!(depthwise && srcRowStart != null),
-        'depthwise conv does not support row-sliced input');
+    assert(
+      !(depthwise && srcRowStart != null),
+      'depthwise conv does not support row-sliced input',
+    );
 
     if (winogradPlan != null &&
         group == 1 &&
@@ -255,13 +276,29 @@ Tensor opConv(
         sw == 1 &&
         dh == 1 &&
         dw == 1 &&
-        ph == 1 &&
-        pw == 1 &&
-        p[2] == 1 &&
-        p[3] == 1 &&
-        bandStart == null &&
-        bandEnd == null) {
-      return _convWinogradF2x2(xf, winogradPlan, bf, n, cIn, m, h, wd);
+        ((ph == 1 && pw == 1 && p[2] == 1 && p[3] == 1) ||
+            (ph == 0 && pw == 0 && p[2] == 0 && p[3] == 0))) {
+      // A pooled call receives only its band's input rows, so outSp was
+      // derived from the slice; Winograd needs the global output height to
+      // place tile rows (and to cap its scratch to the band).
+      final outHGlobal = bandEnd == null ? outSp[0] : globalInH + ph + p[2] - 2;
+      return _convWinogradF2x2(
+        xf,
+        winogradPlan,
+        bf,
+        n,
+        cIn,
+        m,
+        outHGlobal,
+        outSp[1],
+        globalInH,
+        wd,
+        padTop: ph,
+        padLeft: pw,
+        bandStart: b0,
+        bandEnd: bandEnd,
+        srcRowStart: srcStart,
+      );
     }
 
     if (!depthwise) {
@@ -270,7 +307,8 @@ Tensor opConv(
       // GEMM view's column count (band*ow) no longer matches the channel
       // stride (h*w), so the direct-view trick would misindex — im2col
       // handles the band correctly.
-      final pointwise = kh == 1 &&
+      final pointwise =
+          kh == 1 &&
           kw == 1 &&
           sh == 1 &&
           sw == 1 &&
@@ -295,10 +333,10 @@ Tensor opConv(
       final cols = pointwise
           ? null
           : workspace != null && workspace.length >= chunkFloats
-              ? workspace
-              : _convScratch.length >= chunkFloats
-                  ? _convScratch
-                  : (_convScratch = Float32List(chunkFloats));
+          ? workspace
+          : _convScratch.length >= chunkFloats
+          ? _convScratch
+          : (_convScratch = Float32List(chunkFloats));
       // With no padding every im2col slot is overwritten below, so the
       // zero-fill pass is redundant (and costs a full extra sweep over a
       // 32 MiB panel per chunk).
@@ -320,8 +358,7 @@ Tensor opConv(
                   for (int kx = 0; kx < kw; kx++) {
                     final row = ((c * kh + ky) * kw + kx) * chunkN;
                     for (int oyLocal = 0; oyLocal < rows; oyLocal++) {
-                      final iy =
-                          (b0 + row0 + oyLocal) * sh - ph + ky * dh;
+                      final iy = (b0 + row0 + oyLocal) * sh - ph + ky * dh;
                       if (iy < 0 || iy >= globalInH) continue;
                       final ly = iy - srcStart;
                       if (ly < 0 || ly >= h) continue;
@@ -336,7 +373,11 @@ Tensor opConv(
                       }
                       if (sw == 1) {
                         cols.setRange(
-                            colRow + ox0, colRow + ox1, xf, xRow + ox0 + off);
+                          colRow + ox0,
+                          colRow + ox1,
+                          xf,
+                          xRow + ox0 + off,
+                        );
                       } else {
                         for (int ox = ox0; ox < ox1; ox++) {
                           cols[colRow + ox] = xf[xRow + ox * sw + off];
@@ -350,17 +391,18 @@ Tensor opConv(
             // Weight rows are already [mPerGroup × colRows] contiguously.
             // Pointwise convs read the input rows matching the output band.
             gemm.matmulKernel(
-                wf,
-                g * mPerGroup * colRows,
-                cols ?? xf,
-                cols == null ? xGroupBase + (b0 + row0) * wd : 0,
-                out,
-                outOff + row0 * ow,
-                mPerGroup,
-                colRows,
-                chunkN,
-                outStride: colN,
-                panelBytes: _convPanelBytes);
+              wf,
+              g * mPerGroup * colRows,
+              cols ?? xf,
+              cols == null ? xGroupBase + (b0 + row0) * wd : 0,
+              out,
+              outOff + row0 * ow,
+              mPerGroup,
+              colRows,
+              chunkN,
+              outStride: colN,
+              panelBytes: _convPanelBytes,
+            );
           }
         }
       }
@@ -389,7 +431,11 @@ Tensor opConv(
         xpad.fillRange(0, xpad.length, 0);
         for (int y = 0; y < h; y++) {
           xpad.setRange(
-              (y + ph) * wp + pw, (y + ph) * wp + pw + wd, xf, xBase + y * wd);
+            (y + ph) * wp + pw,
+            (y + ph) * wp + pw + wd,
+            xf,
+            xBase + y * wd,
+          );
         }
         final acc0 = bf == null ? 0.0 : bf[om];
         final wBase = om * kh * kw;
@@ -491,36 +537,62 @@ Tensor opConv(
 class WinogradF2x2Plan {
   final List<Float32List> weights;
   final bool narrowDirectGemm;
-  List<Float32List>? _inputTransforms;
-  List<Float32List>? _products;
-  Float32List? _paddedInput;
-  int _tiles = 0;
 
   WinogradF2x2Plan(this.weights, {this.narrowDirectGemm = false});
+}
 
-  (List<Float32List>, List<Float32List>) scratch(int c, int m, int tiles) {
-    if (_inputTransforms == null || _tiles < tiles) {
-      _tiles = tiles;
-      _inputTransforms = List.generate(16, (_) => Float32List(c * _tiles));
-      _products = List.generate(16, (_) => Float32List(m * _tiles));
-    }
-    return (_inputTransforms!, _products!);
-  }
+// Winograd scratch is shared across plans: the pool rebuilds a plan per conv
+// (each node has distinct weights), so per-plan buffers would churn tens of
+// MB per call through the GC. Only one Winograd call runs at a time per
+// isolate, and each buffer is fully overwritten for the region it indexes.
+List<Float32List>? _winoInputTransforms;
+List<Float32List>? _winoProducts;
+int _winoC = 0, _winoM = 0, _winoTiles = 0;
+Float32List? _winoPaddedInput;
 
-  Float32List paddedInput(int c, int paddedH, int paddedW) {
-    final needed = c * paddedH * paddedW;
-    if (_paddedInput == null || _paddedInput!.length < needed) {
-      _paddedInput = Float32List(needed);
-    } else {
-      _paddedInput!.fillRange(0, needed, 0);
-    }
-    return _paddedInput!;
+(List<Float32List>, List<Float32List>) _winogradScratch(
+  int c,
+  int m,
+  int tiles,
+) {
+  if (_winoInputTransforms == null ||
+      _winoC < c ||
+      _winoM < m ||
+      _winoTiles < tiles) {
+    _winoC = _winoC < c ? c : _winoC;
+    _winoM = _winoM < m ? m : _winoM;
+    _winoTiles = _winoTiles < tiles ? tiles : _winoTiles;
+    _winoInputTransforms = List.generate(
+      16,
+      (_) => Float32List(_winoC * _winoTiles),
+    );
+    _winoProducts = List.generate(16, (_) => Float32List(_winoM * _winoTiles));
   }
+  return (_winoInputTransforms!, _winoProducts!);
+}
+
+Float32List _winogradPaddedInput(int c, int paddedH, int paddedW) {
+  final needed = c * paddedH * paddedW;
+  final buf = _winoPaddedInput;
+  if (buf == null || buf.length < needed) {
+    _winoPaddedInput = Float32List(needed);
+  } else {
+    buf.fillRange(0, needed, 0);
+  }
+  return _winoPaddedInput!;
 }
 
 /// Pretransforms `[M,C,3,3]` kernels for Winograd F(2x2,3x3).
-WinogradF2x2Plan pretransformWinogradF2x2(Tensor w,
-    {bool narrowDirectGemm = false}) {
+///
+/// Pass [reuse] to overwrite the weight planes of an existing plan instead of
+/// allocating new ones: the pool rebuilds a plan for every conv node (each has
+/// distinct weights), and at these sizes the transform output alone would churn
+/// several GB per inference. The previous contents are never read concurrently.
+WinogradF2x2Plan pretransformWinogradF2x2(
+  Tensor w, {
+  bool narrowDirectGemm = false,
+  WinogradF2x2Plan? reuse,
+}) {
   final m = w.shape[0], c = w.shape[1], wf = w.f!;
   const g = <List<double>>[
     [1, 0, 0],
@@ -528,7 +600,14 @@ WinogradF2x2Plan pretransformWinogradF2x2(Tensor w,
     [0.5, -0.5, 0.5],
     [0, 0, 1],
   ];
-  final u = List.generate(16, (_) => Float32List(m * c));
+  final reusable =
+      reuse != null &&
+      reuse.weights.length == 16 &&
+      reuse.weights[0].length == m * c &&
+      reuse.weights.every((p) => p.length == m * c);
+  final u = reusable
+      ? reuse.weights
+      : List.generate(16, (_) => Float32List(m * c));
   for (int om = 0; om < m; om++) {
     for (int ic = 0; ic < c; ic++) {
       final base = (om * c + ic) * 9;
@@ -548,44 +627,67 @@ WinogradF2x2Plan pretransformWinogradF2x2(Tensor w,
   return WinogradF2x2Plan(u, narrowDirectGemm: narrowDirectGemm);
 }
 
-Tensor _convWinogradF2x2(Float32List x, WinogradF2x2Plan plan,
-    Float32List? bias, int n, int c, int m, int h, int w) {
-  final th = (h + 1) >> 1, tw = (w + 1) >> 1;
-  final out = Float32List(n * m * h * w);
+Tensor _convWinogradF2x2(
+  Float32List x,
+  WinogradF2x2Plan plan,
+  Float32List? bias,
+  int n,
+  int c,
+  int m,
+  int outH,
+  int outW,
+  int inH,
+  int inW, {
+  int padTop = 1,
+  int padLeft = 1,
+  int bandStart = 0,
+  int? bandEnd,
+  int srcRowStart = 0,
+}) {
+  final b0 = bandStart;
+  final b1 = bandEnd ?? outH;
+  assert(b0 >= 0 && b1 <= outH && b1 > b0, 'band [$b0,$b1) outside $outH');
+  final bandH = b1 - b0;
+  final out = Float32List(n * m * bandH * outW);
+  final tw = (outW + 1) >> 1;
+  final gy0 = b0 >> 1, gy1 = (b1 + 1) >> 1;
+  final sliceRows = x.length ~/ (n * c * inW);
   // Process tile rows in bands: the 16 transformed input/products planes are
   // [c × tiles] and [m × tiles], which at 1024² would otherwise need several
   // GB in flight. Tiles are independent, so banding is bitwise identical.
   const chunkFloats = 16 << 20; // 64 MiB across v + products
   var bandRows = chunkFloats ~/ (16 * (c + m) * tw);
   if (bandRows < 1) bandRows = 1;
-  if (bandRows > th) bandRows = th;
-  final bandTiles = bandRows * tw;
-  final (v, products) = plan.scratch(c, m, bandTiles);
+  if (bandRows > gy1 - gy0) bandRows = gy1 - gy0;
+  final (v, products) = _winogradScratch(c, m, bandRows * tw);
   final u = plan.weights;
   final pw = tw * 2 + 2;
   final tmp = Float64List(16);
   for (int b = 0; b < n; b++) {
-    for (int ty0 = 0; ty0 < th; ty0 += bandRows) {
-      final tyEnd = ty0 + bandRows <= th ? ty0 + bandRows : th;
-      final rows = tyEnd - ty0;
+    for (int cy0 = gy0; cy0 < gy1; cy0 += bandRows) {
+      final cy1 = cy0 + bandRows <= gy1 ? cy0 + bandRows : gy1;
+      final rows = cy1 - cy0;
+      final chunkTiles = rows * tw;
       final padRows = rows * 2 + 2;
-      final padded = plan.paddedInput(c, padRows, pw);
-      // Copy only the input rows this tile band reads (1-row halo on each
-      // side). Padded row 0 is the top pad, so input row y lands on y + 1.
-      final pRow0 = ty0 * 2;
-      final yStart = pRow0 - 1;
-      final yEnd = pRow0 + padRows - 1;
+      final padded = _winogradPaddedInput(c, padRows, pw);
+      // Padded row 0 is global input row `row0`; rows outside the slice the
+      // caller supplied stay zero (only the discarded band-edge outputs read
+      // them, because an output's transform never uses its tile's row 0).
+      final row0 = cy0 * 2 - padTop;
       for (int ic = 0; ic < c; ic++) {
-        final source = (b * c + ic) * h * w;
+        final source = (b * c + ic) * sliceRows * inW;
         final dstBase = ic * padRows * pw;
-        for (int y = yStart; y < yEnd; y++) {
-          if (y < 0 || y >= h) continue;
-          final dst = dstBase + (y + 1 - pRow0) * pw + 1;
-          padded.setRange(dst, dst + w, x, source + y * w);
+        for (int py = 0; py < padRows; py++) {
+          final y = row0 + py;
+          if (y < 0 || y >= inH) continue;
+          final local = y - srcRowStart;
+          if (local < 0 || local >= sliceRows) continue;
+          final dst = dstBase + py * pw + padLeft;
+          padded.setRange(dst, dst + inW, x, source + local * inW);
         }
       }
       for (final q in v) {
-        q.fillRange(0, c * bandTiles, 0);
+        q.fillRange(0, c * chunkTiles, 0);
       }
       for (int ic = 0; ic < c; ic++) {
         final xb = ic * padRows * pw;
@@ -605,53 +707,109 @@ Tensor _convWinogradF2x2(Float32List x, WinogradF2x2Plan plan,
             for (int col = 0; col < 4; col++) {
               final a0 = tmp[col], a1 = tmp[4 + col];
               final a2 = tmp[8 + col], a3 = tmp[12 + col];
-              v[col][ic * bandTiles + tile] = a0 - a2;
-              v[4 + col][ic * bandTiles + tile] = a1 + a2;
-              v[8 + col][ic * bandTiles + tile] = -a1 + a2;
-              v[12 + col][ic * bandTiles + tile] = a1 - a3;
+              v[col][ic * chunkTiles + tile] = a0 - a2;
+              v[4 + col][ic * chunkTiles + tile] = a1 + a2;
+              v[8 + col][ic * chunkTiles + tile] = -a1 + a2;
+              v[12 + col][ic * chunkTiles + tile] = a1 - a3;
             }
           }
         }
       }
       for (int q = 0; q < 16; q++) {
-        products[q].fillRange(0, m * bandTiles, 0);
-        gemm.matmulKernel(u[q], 0, v[q], 0, products[q], 0, m, c, bandTiles,
-            narrowDirect: plan.narrowDirectGemm,
-            panelBytes: _convPanelBytes);
+        products[q].fillRange(0, m * chunkTiles, 0);
+        gemm.matmulKernel(
+          u[q],
+          0,
+          v[q],
+          0,
+          products[q],
+          0,
+          m,
+          c,
+          chunkTiles,
+          narrowDirect: plan.narrowDirectGemm,
+          panelBytes: _convPanelBytes,
+        );
       }
       for (int om = 0; om < m; om++) {
-        final ob = (b * m + om) * h * w;
+        final ob = (b * m + om) * bandH * outW;
         for (int ty = 0; ty < rows; ty++) {
+          final oy = (cy0 + ty) * 2;
+          final write0 = oy >= b0 && oy < b1;
+          final write1 = oy + 1 >= b0 && oy + 1 < b1;
+          if (!write0 && !write1) continue;
+          final base0 = ob + (oy - b0) * outW;
+          final base1 = ob + (oy + 1 - b0) * outW;
           for (int tx = 0; tx < tw; tx++) {
             final tile = ty * tw + tx;
             for (int col = 0; col < 4; col++) {
-              final a0 = products[col][om * bandTiles + tile];
-              final a1 = products[4 + col][om * bandTiles + tile];
-              final a2 = products[8 + col][om * bandTiles + tile];
-              final a3 = products[12 + col][om * bandTiles + tile];
+              final a0 = products[col][om * chunkTiles + tile];
+              final a1 = products[4 + col][om * chunkTiles + tile];
+              final a2 = products[8 + col][om * chunkTiles + tile];
+              final a3 = products[12 + col][om * chunkTiles + tile];
               tmp[col] = a0 + a1 + a2;
               tmp[4 + col] = a1 - a2 - a3;
             }
-            final oy = (ty0 + ty) * 2, ox = tx * 2;
-            final b0 = bias == null ? 0.0 : bias[om];
-            if (oy < h && ox < w) {
-              out[ob + oy * w + ox] = tmp[0] + tmp[1] + tmp[2] + b0;
+            final ox = tx * 2;
+            final bias0 = bias == null ? 0.0 : bias[om];
+            if (write0 && ox < outW) {
+              out[base0 + ox] = tmp[0] + tmp[1] + tmp[2] + bias0;
             }
-            if (oy < h && ox + 1 < w) {
-              out[ob + oy * w + ox + 1] = tmp[1] - tmp[2] - tmp[3] + b0;
+            if (write0 && ox + 1 < outW) {
+              out[base0 + ox + 1] = tmp[1] - tmp[2] - tmp[3] + bias0;
             }
-            if (oy + 1 < h && ox < w) {
-              out[ob + (oy + 1) * w + ox] = tmp[4] + tmp[5] + tmp[6] + b0;
+            if (write1 && ox < outW) {
+              out[base1 + ox] = tmp[4] + tmp[5] + tmp[6] + bias0;
             }
-            if (oy + 1 < h && ox + 1 < w) {
-              out[ob + (oy + 1) * w + ox + 1] = tmp[5] - tmp[6] - tmp[7] + b0;
+            if (write1 && ox + 1 < outW) {
+              out[base1 + ox + 1] = tmp[5] - tmp[6] - tmp[7] + bias0;
             }
           }
         }
       }
     }
   }
-  return Tensor.float(out, [n, m, h, w]);
+  return Tensor.float(out, [n, m, bandH, outW]);
+}
+
+/// Whether a 2-D `Conv` is both Winograd F(2x2,3x3)-compatible and large
+/// enough for its per-call weight transform to pay off. Only symmetric
+/// zero/one-pixel padding qualifies. Both `run` and the isolate pool use this,
+/// so the decision (and therefore the arithmetic) is identical in each path.
+bool convWinogradEligible({
+  required List<int> wShape,
+  required List<int> inShape,
+  List<int>? strides,
+  List<int>? pads,
+  List<int>? dilations,
+  int group = 1,
+  String autoPad = 'NOTSET',
+  int minOutPixels = 1024,
+}) {
+  if (const bool.fromEnvironment('onnx_no_winograd')) return false;
+  if (group != 1 || wShape.length != 4 || inShape.length != 4) return false;
+  if (wShape[2] != 3 || wShape[3] != 3) return false;
+  if (autoPad != 'NOTSET' || pads == null || pads.length != 4) return false;
+  if (!(pads.every((v) => v == 0) || pads.every((v) => v == 1))) return false;
+  final s = strides ?? const [1, 1];
+  final d = dilations ?? const [1, 1];
+  if (s.length != 2 ||
+      d.length != 2 ||
+      s[0] != 1 ||
+      s[1] != 1 ||
+      d[0] != 1 ||
+      d[1] != 1) {
+    return false;
+  }
+  final (_, outSp) = _resolvePads(
+    inDims: inShape.sublist(2),
+    kernel: wShape.sublist(2),
+    strides: s,
+    dilations: d,
+    autoPad: autoPad,
+    pads: pads,
+  );
+  return outSp[0] * outSp[1] >= minOutPixels;
 }
 
 /// `ConvTranspose` — N-dimensional transposed convolution via output scatter:
@@ -711,7 +869,16 @@ Tensor opConvTranspose(
       }
       prod.fillRange(0, prod.length, 0);
       gemm.matmulKernel(
-          wT, 0, xf, g * cPerGroup * f, prod, 0, mk, cPerGroup, f);
+        wT,
+        0,
+        xf,
+        g * cPerGroup * f,
+        prod,
+        0,
+        mk,
+        cPerGroup,
+        f,
+      );
       for (int mm = 0; mm < mPerGroup; mm++) {
         final oBase = (g * mPerGroup + mm) * outW;
         for (int kk = 0; kk < k; kk++) {
@@ -765,7 +932,16 @@ Tensor opConvTranspose(
       }
       prod.fillRange(0, prod.length, 0);
       gemm.matmulKernel(
-          wT, 0, xf, g * cPerGroup * hw, prod, 0, mkk, cPerGroup, hw);
+        wT,
+        0,
+        xf,
+        g * cPerGroup * hw,
+        prod,
+        0,
+        mkk,
+        cPerGroup,
+        hw,
+      );
       // col2im: overlap-add each (mm, kh, kw) plane into the output.
       for (int mm = 0; mm < mPerGroup; mm++) {
         final oBase = (g * mPerGroup + mm) * bandRows * outW;
@@ -904,13 +1080,14 @@ Tensor _pool(
   final s = strides ?? List.filled(nd, 1);
   final d = dilations ?? List.filled(nd, 1);
   final (p, outSp) = _resolvePads(
-      inDims: inSp,
-      kernel: kernel,
-      strides: s,
-      dilations: d,
-      autoPad: autoPad,
-      pads: pads,
-      ceilMode: ceilMode);
+    inDims: inSp,
+    kernel: kernel,
+    strides: s,
+    dilations: d,
+    autoPad: autoPad,
+    pads: pads,
+    ceilMode: ceilMode,
+  );
 
   final xf = x.asFloatList();
   final outSpN = _prod(outSp), inSpN = _prod(inSp), kN = _prod(kernel);
@@ -953,8 +1130,9 @@ Tensor _pool(
           kCoord[a] = 0;
         }
       }
-      out[outBase + oi] =
-          isMax ? best : sum / (countIncludePad ? kN : math.max(count, 1));
+      out[outBase + oi] = isMax
+          ? best
+          : sum / (countIncludePad ? kN : math.max(count, 1));
       for (int a = nd - 1; a >= 0; a--) {
         if (++oCoord[a] < outSp[a]) break;
         oCoord[a] = 0;
@@ -964,37 +1142,43 @@ Tensor _pool(
   return Tensor.float(out, [n, c, ...outSp]);
 }
 
-Tensor opMaxPool(Tensor x,
-        {required List<int> kernel,
-        List<int>? strides,
-        List<int>? pads,
-        List<int>? dilations,
-        String autoPad = 'NOTSET',
-        bool ceilMode = false}) =>
-    _pool(x,
-        kernel: kernel,
-        isMax: true,
-        strides: strides,
-        pads: pads,
-        dilations: dilations,
-        autoPad: autoPad,
-        ceilMode: ceilMode);
+Tensor opMaxPool(
+  Tensor x, {
+  required List<int> kernel,
+  List<int>? strides,
+  List<int>? pads,
+  List<int>? dilations,
+  String autoPad = 'NOTSET',
+  bool ceilMode = false,
+}) => _pool(
+  x,
+  kernel: kernel,
+  isMax: true,
+  strides: strides,
+  pads: pads,
+  dilations: dilations,
+  autoPad: autoPad,
+  ceilMode: ceilMode,
+);
 
-Tensor opAveragePool(Tensor x,
-        {required List<int> kernel,
-        List<int>? strides,
-        List<int>? pads,
-        String autoPad = 'NOTSET',
-        bool ceilMode = false,
-        bool countIncludePad = false}) =>
-    _pool(x,
-        kernel: kernel,
-        isMax: false,
-        strides: strides,
-        pads: pads,
-        autoPad: autoPad,
-        ceilMode: ceilMode,
-        countIncludePad: countIncludePad);
+Tensor opAveragePool(
+  Tensor x, {
+  required List<int> kernel,
+  List<int>? strides,
+  List<int>? pads,
+  String autoPad = 'NOTSET',
+  bool ceilMode = false,
+  bool countIncludePad = false,
+}) => _pool(
+  x,
+  kernel: kernel,
+  isMax: false,
+  strides: strides,
+  pads: pads,
+  autoPad: autoPad,
+  ceilMode: ceilMode,
+  countIncludePad: countIncludePad,
+);
 
 /// Global pooling: reduce every spatial dim to 1 (shape [N, C, 1, ...]).
 Tensor opGlobalPool(Tensor x, {required bool isMax}) {
@@ -1028,8 +1212,14 @@ Tensor opGlobalPool(Tensor x, {required bool isMax}) {
 /// `BatchNormalization` (inference mode): per-channel
 /// `y = scale * (x - mean) / sqrt(var + eps) + bias`, folded into one
 /// multiply-add per element.
-Tensor opBatchNormalization(Tensor x, Tensor scale, Tensor bias, Tensor mean,
-    Tensor variance, double epsilon) {
+Tensor opBatchNormalization(
+  Tensor x,
+  Tensor scale,
+  Tensor bias,
+  Tensor mean,
+  Tensor variance,
+  double epsilon,
+) {
   final c = x.shape[1];
   final spN = _prod(x.shape.sublist(2));
   final n = x.shape[0];
@@ -1059,13 +1249,21 @@ Tensor opBatchNormalization(Tensor x, Tensor scale, Tensor bias, Tensor mean,
 /// `InstanceNormalization`: GroupNormalization with one group per channel
 /// (mean/variance over each (n, c) instance's spatial dims).
 Tensor opInstanceNormalization(
-        Tensor x, Tensor scale, Tensor bias, double epsilon) =>
-    opGroupNormalization(x, scale, bias, x.shape[1], epsilon);
+  Tensor x,
+  Tensor scale,
+  Tensor bias,
+  double epsilon,
+) => opGroupNormalization(x, scale, bias, x.shape[1], epsilon);
 
 /// `GroupNormalization` (opset 18+): mean/variance per (batch, group), then
 /// per-channel scale and bias.
 Tensor opGroupNormalization(
-    Tensor x, Tensor scale, Tensor bias, int numGroups, double epsilon) {
+  Tensor x,
+  Tensor scale,
+  Tensor bias,
+  int numGroups,
+  double epsilon,
+) {
   final n = x.shape[0], c = x.shape[1];
   final spN = _prod(x.shape.sublist(2));
   final cPerGroup = c ~/ numGroups;
@@ -1074,8 +1272,10 @@ Tensor opGroupNormalization(
   // Opset 18-20 defines scale/bias per GROUP; opset 21+ per channel.
   final perGroupAffine = sf.length == numGroups && numGroups != c;
   if (!perGroupAffine && sf.length != c) {
-    throw ArgumentError('GroupNormalization scale length ${sf.length} '
-        'matches neither num_groups=$numGroups nor channels=$c');
+    throw ArgumentError(
+      'GroupNormalization scale length ${sf.length} '
+      'matches neither num_groups=$numGroups nor channels=$c',
+    );
   }
   final xf = x.asFloatList();
   final out = Float32List(xf.length);
@@ -1111,13 +1311,18 @@ Tensor opGroupNormalization(
 /// `GridSample` (2-D): samples [x] `[N,C,H,W]` at normalized grid
 /// coordinates `[N,Ho,Wo,2]` (x then y in [-1, 1]). Bilinear or nearest,
 /// zeros / border / reflection padding.
-Tensor opGridSample(Tensor x, Tensor grid,
-    {String mode = 'linear',
-    String paddingMode = 'zeros',
-    bool alignCorners = false}) {
+Tensor opGridSample(
+  Tensor x,
+  Tensor grid, {
+  String mode = 'linear',
+  String paddingMode = 'zeros',
+  bool alignCorners = false,
+}) {
   if (x.rank != 4 || grid.rank != 4) {
-    throw UnsupportedError('GridSample: only 2-D (rank-4) inputs supported, '
-        'got input rank ${x.rank} / grid rank ${grid.rank}');
+    throw UnsupportedError(
+      'GridSample: only 2-D (rank-4) inputs supported, '
+      'got input rank ${x.rank} / grid rank ${grid.rank}',
+    );
   }
   if (mode != 'linear' && mode != 'bilinear' && mode != 'nearest') {
     throw UnsupportedError('GridSample: mode "$mode" not supported');
@@ -1181,7 +1386,8 @@ Tensor opGridSample(Tensor x, Tensor grid,
         final w21 = fy * (1 - fx), w22 = fy * fx;
         for (int ch = 0; ch < c; ch++) {
           final base = (b * c + ch) * planeSize;
-          out[outIdx + ch * ho * wo] = (o11 < 0 ? 0 : xf[base + o11] * w11) +
+          out[outIdx + ch * ho * wo] =
+              (o11 < 0 ? 0 : xf[base + o11] * w11) +
               (o12 < 0 ? 0 : xf[base + o12] * w12) +
               (o21 < 0 ? 0 : xf[base + o21] * w21) +
               (o22 < 0 ? 0 : xf[base + o22] * w22);
@@ -1195,13 +1401,17 @@ Tensor opGridSample(Tensor x, Tensor grid,
 /// `RoiAlign` (2-D, average or max): pools each ROI `[x1,y1,x2,y2]` (input
 /// coordinate scale via [spatialScale]) into `[outH, outW]` bins with
 /// bilinear sampling; `half_pixel` subtracts 0.5 after scaling.
-Tensor opRoiAlign(Tensor x, Tensor rois, Tensor batchIndices,
-    {required int outH,
-    required int outW,
-    double spatialScale = 1.0,
-    int samplingRatio = 0,
-    bool isMax = false,
-    bool halfPixel = true}) {
+Tensor opRoiAlign(
+  Tensor x,
+  Tensor rois,
+  Tensor batchIndices, {
+  required int outH,
+  required int outW,
+  double spatialScale = 1.0,
+  int samplingRatio = 0,
+  bool isMax = false,
+  bool halfPixel = true,
+}) {
   final c = x.shape[1], h = x.shape[2], w = x.shape[3];
   final nRoi = rois.shape[0];
   final xf = x.asFloatList(), rf = rois.asFloatList();
@@ -1259,8 +1469,9 @@ Tensor opRoiAlign(Tensor x, Tensor rois, Tensor batchIndices,
               }
             }
           }
-          out[((r * c + ch) * outH + oy) * outW + ox] =
-              isMax ? acc : acc / (gH * gW);
+          out[((r * c + ch) * outH + oy) * outW + ox] = isMax
+              ? acc
+              : acc / (gH * gW);
         }
       }
     }
@@ -1273,7 +1484,12 @@ Tensor opRoiAlign(Tensor x, Tensor rois, Tensor batchIndices,
 // ---------------------------------------------------------------------------
 
 double _sourceCoord(
-    int outIdx, double scale, int inDim, int outDim, String coordMode) {
+  int outIdx,
+  double scale,
+  int inDim,
+  int outDim,
+  String coordMode,
+) {
   switch (coordMode) {
     case 'align_corners':
       return outDim == 1 ? 0 : outIdx * (inDim - 1) / (outDim - 1);
@@ -1289,12 +1505,14 @@ double _sourceCoord(
 /// `Resize` for NCHW tensors, `nearest` and `linear` modes, resizing the
 /// spatial dims (N/C scales must be 1). Supports the common
 /// coordinate_transformation_modes and nearest_modes.
-Tensor opResize(Tensor x,
-    {List<double>? scales,
-    List<int>? sizes,
-    String mode = 'nearest',
-    String coordMode = 'half_pixel',
-    String nearestMode = 'round_prefer_floor'}) {
+Tensor opResize(
+  Tensor x, {
+  List<double>? scales,
+  List<int>? sizes,
+  String mode = 'nearest',
+  String coordMode = 'half_pixel',
+  String nearestMode = 'round_prefer_floor',
+}) {
   if (x.rank == 3) {
     // 1-D temporal resize (NCW): run as NCHW with a singleton height.
     final y = opResize(
@@ -1312,17 +1530,23 @@ Tensor opResize(Tensor x,
   int outH, outW;
   double scaleH, scaleW;
   if (sizes != null) {
-    assert(sizes.length == 4 && sizes[0] == n && sizes[1] == c,
-        'Resize: only spatial dims may change');
+    assert(
+      sizes.length == 4 && sizes[0] == n && sizes[1] == c,
+      'Resize: only spatial dims may change',
+    );
     outH = sizes[2];
     outW = sizes[3];
     scaleH = outH / h;
     scaleW = outW / w;
   } else {
     assert(
-        scales != null && scales.length == 4, 'Resize needs scales or sizes');
-    assert(scales![0] == 1 && scales[1] == 1,
-        'Resize: only spatial dims may change');
+      scales != null && scales.length == 4,
+      'Resize needs scales or sizes',
+    );
+    assert(
+      scales![0] == 1 && scales[1] == 1,
+      'Resize: only spatial dims may change',
+    );
     scaleH = scales![2];
     scaleW = scales[3];
     outH = (h * scaleH).floor();

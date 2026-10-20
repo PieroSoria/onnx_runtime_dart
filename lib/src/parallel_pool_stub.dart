@@ -6,6 +6,8 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'tensor.dart';
+
 class PartitionedWeight {
   final int k, n;
   final List<int> colCounts;
@@ -19,50 +21,70 @@ class GemmPool {
   int get workerCount => 0;
 
   static Future<GemmPool> spawn(
-          int workers, Map<String, (Float32List, int, int)> toPartition,
-          [Map<String, (Float32List, List<int>, Float32List?)> convToReplicate =
-              const {}]) =>
-      throw UnsupportedError(
-          'Parallel execution requires isolates (native targets only)');
+    int workers,
+    Map<String, (Float32List, int, int)> toPartition, [
+    Map<String, (Float32List, List<int>, Float32List?)> convToReplicate =
+        const {},
+    Set<String>? convNames,
+  ]) => throw UnsupportedError(
+    'Parallel execution requires isolates (native targets only)',
+  );
 
   Future<Float32List> matmul(String name, Float32List a, int m) =>
       throw UnsupportedError('no pool on this platform');
 
   Future<Float32List> matmulRuntime(
-          Float32List a, int m, Float32List b, int k, int n) =>
-      throw UnsupportedError('no pool on this platform');
+    Float32List a,
+    int m,
+    Float32List b,
+    int k,
+    int n,
+  ) => throw UnsupportedError('no pool on this platform');
 
   Future<Float32List> matmulBatched(
-          Float32List a, int m, int k, Float32List b, int batch, int n) =>
-      throw UnsupportedError('no pool on this platform');
+    Float32List a,
+    int m,
+    int k,
+    Float32List b,
+    int batch,
+    int n,
+  ) => throw UnsupportedError('no pool on this platform');
 
-  Future<Float32List> conv(String name, Float32List x, List<int> xShape,
-          {required List<int>? strides,
-          required List<int>? pads,
-          required List<int>? dilations,
-          required int group,
-          required String autoPad,
-          required int kernelH,
-          required int n,
-          required int m,
-          required int oh,
-          required int ow,
-          bool depthwise = false}) =>
-      throw UnsupportedError('no pool on this platform');
+  Future<Float32List> conv(
+    String name,
+    Float32List x,
+    List<int> xShape, {
+    required List<int>? strides,
+    required List<int>? pads,
+    required List<int>? dilations,
+    required int group,
+    required String autoPad,
+    required int kernelH,
+    required int n,
+    required int m,
+    required int oh,
+    required int ow,
+    bool depthwise = false,
+    bool winograd = false,
+    Tensor? weight,
+    Tensor? bias,
+  }) => throw UnsupportedError('no pool on this platform');
 
-  Future<Float32List> convTranspose(String name, Float32List x,
-          List<int> xShape,
-          {required List<int>? strides,
-          required List<int>? pads,
-          required List<int>? dilations,
-          required List<int>? outputPadding,
-          required int group,
-          required int kernelH,
-          required int n,
-          required int m,
-          required int oh,
-          required int ow}) =>
-      throw UnsupportedError('no pool on this platform');
+  Future<Float32List> convTranspose(
+    String name,
+    Float32List x,
+    List<int> xShape, {
+    required List<int>? strides,
+    required List<int>? pads,
+    required List<int>? dilations,
+    required List<int>? outputPadding,
+    required int group,
+    required int kernelH,
+    required int n,
+    required int m,
+    required int oh,
+    required int ow,
+  }) => throw UnsupportedError('no pool on this platform');
 
   void dispose() {}
 }

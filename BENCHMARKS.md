@@ -89,23 +89,43 @@ the ORT reference with the snippet in `git log` for this file or ad-hoc via
 ## LaMa inpainting, 1024² (`lama_manga_large_1024.onnx`, 196 MB)
 
 Windows dev box, 32 logical cores, `dart run tool/bench.dart <model> --iters 1`
-(min of one timed run after warmup; peak RSS sampled across all Dart processes).
-Inputs are synthesized (`image [1,3,1024,1024]`, `mask [1,1,1024,1024]`), so the
-numbers measure the full graph, not pre/post-processing.
+(min of one timed run after warmup). Peak RSS is the whole process as reported
+by `ProcessInfo.maxRss` (all isolate workers live in it); the bench prints it
+after the profile. Inputs are synthesized (`image [1,3,1024,1024]`,
+`mask [1,1,1024,1024]`), so the numbers measure the full graph, not
+pre/post-processing.
 
 | Date | Mode | wall | Conv | MatMul | ConvTranspose | Pad | peak RSS |
 |---|---|---|---|---|---|---|---|
 | 2026-10-20 | `run()` baseline (full im2col workspace) | 177.0 s | 151.0 s | 10.3 s | 6.1 s | 5.2 s | ~15 GB |
-| 2026-10-20 | `run()` + chunked im2col / 32 MiB cap | 108.7 s | 89.4 s | 9.7 s | 5.9 s | 0.4 s | <0.5 GB |
-| 2026-10-20 | `runAsync()`, 16 workers, `poolConv: true` | **27.9 s** | 19.4 s | 3.8 s | 1.2 s | 0.5 s | 1.2 GB |
+| 2026-10-20 | `run()` + chunked im2col (32 MiB cap) | 108.7 s | 89.4 s | 9.7 s | 5.9 s | 0.4 s | ~1.3 GB |
+| 2026-10-20 | `run()`, 3×3 Winograd (busy box below) | 85.2 s | 65.9 s | — | — | — | 2.6 GB |
+| 2026-10-20 | `runAsync()`, 16 w, `poolConv`, replicated kernels | 27.9 s | 19.4 s | 3.8 s | 1.2 s | 0.5 s | ~7.0 GB |
+| 2026-10-20 | `runAsync()`, 16 w, `poolConv` im2col A/B (busy box) | 41.8 s | 29.8 s | 5.3 s | 1.7 s | 0.8 s | 7.0 GB |
+| 2026-10-20 | + Winograd, replicated kernels (busy box) | 28.4 s | 17.1 s | 4.5 s | 1.5 s | 0.8 s | 7.5 GB |
+| 2026-10-20 | + on-demand kernels (busy box) | **22.2 s** | 14.1 s | 3.4 s | 1.3 s | 0.5 s | **3.8 GB** |
+
+The last three rows are back-to-back A/B runs while another process held
+~50% of the CPU, so their absolute times are conservative; they isolate the
+two changes: 3×3 Winograd took the pooled wall from 41.8 s to 28.4 s, then
+shipping conv kernels per request (instead of replicating all 222 of them to
+16 workers) took it to 22.2 s and cut peak RSS from 7.5 GB to 3.8 GB. Run
+with `-Donnx_no_winograd=true` to reproduce the im2col side. Errors
+vs the im2col path are at FP32 rounding level (~1e-6), not bitwise: `run()`
+and `runAsync()` make the same Winograd choice, so they remain bitwise-equal
+to each other.
 
 What moved the needle:
 
 - **Bounded im2col.** The 1024² 384→128 3×3 convs need
-  `C·kh·kw·oh·ow ≈ 14 GB` for a full column matrix. `opConv` now chunks over
+  `C·kh·kw·oh·ow ≈ 14 GB` for a full column matrix. `opConv` chunks over
   output rows (32 MiB panel), and the graph only keeps a workspace when it is
-  under 8 M floats. Winograd tiles its own row bands and no longer allocates
-  im2col at all.
+  under 8 M floats.
+- **Winograd F(2×2,3×3).** All 3×3 `pads=0/1` convs with ≥1024 output pixels
+  run Winograd, locally and in row bands. Plans are rebuilt per conv node
+  (each kernel is distinct) but the 16 transformed-kernel planes and the
+  banded scratch are reused by shape, so the pool does not churn GBs through
+  the GC. ≈2× fewer multiplies per output.
 - **2 MiB GEMM panels + small-M kernel.** Conv `k` is large, so the default
   192 KiB B-panel re-read the weights hundreds of times per call; 2 MiB keeps
   the panel in L2. The final 3-channel 7×7 conv (`m=3`) now streams B once
@@ -118,13 +138,17 @@ What moved the needle:
   along A (large) or B's leading batch (FFC twiddles) instead of copying the
   whole activation to every worker. Workers also reuse a persistent im2col
   scratch.
+- **Bounded resident set.** Conv kernels travel with each request instead of
+  being replicated at `parallelize()` time. A 196 MB model at 16 workers used
+  to pin ~3 GB of duplicate weights; the per-call copy costs <1 s over 222
+  convs. 32 workers now fit (4.2 GB) but are no faster (23.7 s).
 - **Adaptive scope.** Depthwise/grouped convs and `output_shape` ConvTranspose
   stay local; MatMul weights below `minWeightElements` stay local.
 
-32 workers gave no further gain (28.5 s): at this point the main isolate is the
-bottleneck (per-conv band slicing, slab stitching, and elementwise ops). `Conv`
-is still 19.4 s (~70% of wall); a single 384→128 130² conv reaches
-~120 GFLOP/s aggregate on the 16-worker pool, and the remaining headroom is in
-Winograd/F(2×2,3×3) for the many 3×3 `pads=0` FFC convs and in parallelizing
-large elementwise ops.
+At 22.2 s the main isolate is the bottleneck for the remaining non-conv work
+(elementwise ≈ 2.4 s, `MatMul` 3.4 s, `ConvTranspose` 1.3 s) and slabs must
+still be sliced/stitched there. `Conv` is 14.1 s (~64% of wall); the next
+lever is parallelizing large elementwise ops and overlapping their bands with
+conv work.
+
 

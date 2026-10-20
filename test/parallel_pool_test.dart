@@ -54,12 +54,15 @@ void main() {
           ..input.addAll(['H3', 'B'])
           ..output.add('Y'),
       ]);
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(
-        Float32List.fromList(
-            List.generate(8 * 96, (_) => _rng.nextDouble() * 2 - 1)),
-        [8, 96]);
+      Float32List.fromList(
+        List.generate(8 * 96, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [8, 96],
+    );
 
     final want = model.run({'X': x}, ['Y'])['Y']!;
 
@@ -67,24 +70,32 @@ void main() {
     try {
       final got = (await model.runAsync({'X': x}, ['Y']))['Y']!;
       expect(got.shape, want.shape);
-      expect(got.asFloatList(), want.asFloatList(),
-          reason: 'pooled matmul must be bitwise-identical');
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'pooled matmul must be bitwise-identical',
+      );
 
       // Batched (3-D) activation through the same 2-D weight.
       final g3 = GraphProto()
         ..input.add(ValueInfoProto()..name = 'X')
         ..output.add(ValueInfoProto()..name = 'Y')
         ..initializer.add(_floatInit('W', [96, 64]))
-        ..node.add(NodeProto()
-          ..opType = 'MatMul'
-          ..input.addAll(['X', 'W'])
-          ..output.add('Y'));
-      final m3 =
-          OnnxModel.fromBytes((ModelProto()..graph = g3).writeToBuffer());
+        ..node.add(
+          NodeProto()
+            ..opType = 'MatMul'
+            ..input.addAll(['X', 'W'])
+            ..output.add('Y'),
+        );
+      final m3 = OnnxModel.fromBytes(
+        (ModelProto()..graph = g3).writeToBuffer(),
+      );
       final x3 = Tensor.float(
-          Float32List.fromList(
-              List.generate(2 * 5 * 96, (_) => _rng.nextDouble())),
-          [2, 5, 96]);
+        Float32List.fromList(
+          List.generate(2 * 5 * 96, (_) => _rng.nextDouble()),
+        ),
+        [2, 5, 96],
+      );
       final want3 = m3.run({'X': x3}, ['Y'])['Y']!;
       await m3.parallelize(workers: 2, minWeightElements: 1000);
       try {
@@ -107,34 +118,42 @@ void main() {
         _floatInit('W', [64, 96]), // transB: effective B is W^T [96, 64]
         _floatInit('C', [64]),
       ])
-      ..node.add(NodeProto()
-        ..opType = 'Gemm'
-        ..input.addAll(['X', 'W', 'C'])
-        ..output.add('Y')
-        ..attribute.addAll([
-          AttributeProto()
-            ..name = 'transB'
-            ..i = Int64(1),
-          AttributeProto()
-            ..name = 'alpha'
-            ..f = 2.0,
-          AttributeProto()
-            ..name = 'beta'
-            ..f = 0.5,
-        ]));
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+      ..node.add(
+        NodeProto()
+          ..opType = 'Gemm'
+          ..input.addAll(['X', 'W', 'C'])
+          ..output.add('Y')
+          ..attribute.addAll([
+            AttributeProto()
+              ..name = 'transB'
+              ..i = Int64(1),
+            AttributeProto()
+              ..name = 'alpha'
+              ..f = 2.0,
+            AttributeProto()
+              ..name = 'beta'
+              ..f = 0.5,
+          ]),
+      );
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(
-        Float32List.fromList(
-            List.generate(8 * 96, (_) => _rng.nextDouble() * 2 - 1)),
-        [8, 96]);
+      Float32List.fromList(
+        List.generate(8 * 96, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [8, 96],
+    );
     final want = model.run({'X': x}, ['Y'])['Y']!;
     await model.parallelize(workers: 3, minWeightElements: 1000);
     try {
       final got = (await model.runAsync({'X': x}, ['Y']))['Y']!;
       expect(got.shape, want.shape);
-      expect(got.asFloatList(), want.asFloatList(),
-          reason: 'pooled Gemm must be bitwise-identical');
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'pooled Gemm must be bitwise-identical',
+      );
     } finally {
       model.dispose();
     }
@@ -153,27 +172,78 @@ void main() {
           ..opType = 'Conv'
           ..input.addAll(['X', 'W', 'B'])
           ..output.add('C')
-          ..attribute.add(AttributeProto()
-            ..name = 'pads'
-            ..ints.addAll([Int64(1), Int64(1), Int64(1), Int64(1)])),
+          ..attribute.add(
+            AttributeProto()
+              ..name = 'pads'
+              ..ints.addAll([Int64(1), Int64(1), Int64(1), Int64(1)]),
+          ),
         NodeProto()
           ..opType = 'Relu'
           ..input.add('C')
           ..output.add('Y'),
       ]);
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(
-        Float32List.fromList(
-            List.generate(3 * 16 * 12, (_) => _rng.nextDouble() * 2 - 1)),
-        [1, 3, 16, 12]);
+      Float32List.fromList(
+        List.generate(3 * 16 * 12, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [1, 3, 16, 12],
+    );
     final want = model.run({'X': x}, ['Y'])['Y']!;
     await model.parallelize(workers: 3, poolConv: true);
     try {
       final got = (await model.runAsync({'X': x}, ['Y']))['Y']!;
       expect(got.shape, want.shape);
-      expect(got.asFloatList(), want.asFloatList(),
-          reason: 'pooled conv must be bitwise-identical');
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'pooled conv must be bitwise-identical',
+      );
+    } finally {
+      model.dispose();
+    }
+  });
+
+  test('pooled Winograd conv (pads=0) == sync, bitwise', () async {
+    final g = GraphProto()
+      ..input.add(ValueInfoProto()..name = 'X')
+      ..output.add(ValueInfoProto()..name = 'Y')
+      ..initializer.addAll([
+        _floatInit('W', [8, 5, 3, 3]),
+        _floatInit('B', [8]),
+      ])
+      ..node.add(
+        NodeProto()
+          ..opType = 'Conv'
+          ..input.addAll(['X', 'W', 'B'])
+          ..output.add('Y')
+          ..attribute.add(
+            AttributeProto()
+              ..name = 'pads'
+              ..ints.addAll([Int64(0), Int64(0), Int64(0), Int64(0)]),
+          ),
+      );
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
+    final x = Tensor.float(
+      Float32List.fromList(
+        List.generate(5 * 42 * 40, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [1, 5, 42, 40],
+    );
+    final want = model.run({'X': x}, ['Y'])['Y']!;
+    await model.parallelize(workers: 3, poolConv: true);
+    try {
+      final got = (await model.runAsync({'X': x}, ['Y']))['Y']!;
+      expect(got.shape, want.shape);
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'pooled pads=0 Winograd must be bitwise-identical',
+      );
     } finally {
       model.dispose();
     }
@@ -187,35 +257,42 @@ void main() {
         _floatInit('W', [4, 6, 3, 3]),
         _floatInit('B', [6]),
       ])
-      ..node.add(NodeProto()
-        ..opType = 'ConvTranspose'
-        ..input.addAll(['X', 'W', 'B'])
-        ..output.add('Y')
-        ..attribute.addAll([
-          AttributeProto()
-            ..name = 'strides'
-            ..ints.addAll([Int64(2), Int64(2)]),
-          AttributeProto()
-            ..name = 'pads'
-            ..ints.addAll(
-                [Int64(1), Int64(1), Int64(1), Int64(1)]),
-          AttributeProto()
-            ..name = 'output_padding'
-            ..ints.addAll([Int64(1), Int64(1)]),
-        ]));
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+      ..node.add(
+        NodeProto()
+          ..opType = 'ConvTranspose'
+          ..input.addAll(['X', 'W', 'B'])
+          ..output.add('Y')
+          ..attribute.addAll([
+            AttributeProto()
+              ..name = 'strides'
+              ..ints.addAll([Int64(2), Int64(2)]),
+            AttributeProto()
+              ..name = 'pads'
+              ..ints.addAll([Int64(1), Int64(1), Int64(1), Int64(1)]),
+            AttributeProto()
+              ..name = 'output_padding'
+              ..ints.addAll([Int64(1), Int64(1)]),
+          ]),
+      );
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(
-        Float32List.fromList(
-            List.generate(4 * 8 * 6, (_) => _rng.nextDouble() * 2 - 1)),
-        [1, 4, 8, 6]);
+      Float32List.fromList(
+        List.generate(4 * 8 * 6, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [1, 4, 8, 6],
+    );
     final want = model.run({'X': x}, ['Y'])['Y']!;
     await model.parallelize(workers: 3, poolConv: true);
     try {
       final got = (await model.runAsync({'X': x}, ['Y']))['Y']!;
       expect(got.shape, want.shape);
-      expect(got.asFloatList(), want.asFloatList(),
-          reason: 'banded ConvTranspose must be bitwise-identical');
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'banded ConvTranspose must be bitwise-identical',
+      );
     } finally {
       model.dispose();
     }
@@ -226,31 +303,39 @@ void main() {
       ..input.add(ValueInfoProto()..name = 'X')
       ..output.add(ValueInfoProto()..name = 'Y')
       ..initializer.add(_floatInit('W', [8, 4, 5]))
-      ..node.add(NodeProto()
-        ..opType = 'Conv'
-        ..input.addAll(['X', 'W'])
-        ..output.add('Y')
-        ..attribute.addAll([
-          AttributeProto()
-            ..name = 'pads'
-            ..ints.addAll([Int64(2), Int64(2)]),
-          AttributeProto()
-            ..name = 'dilations'
-            ..ints.add(Int64(2)),
-        ]));
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+      ..node.add(
+        NodeProto()
+          ..opType = 'Conv'
+          ..input.addAll(['X', 'W'])
+          ..output.add('Y')
+          ..attribute.addAll([
+            AttributeProto()
+              ..name = 'pads'
+              ..ints.addAll([Int64(2), Int64(2)]),
+            AttributeProto()
+              ..name = 'dilations'
+              ..ints.add(Int64(2)),
+          ]),
+      );
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(
-        Float32List.fromList(
-            List.generate(4 * 240, (_) => _rng.nextDouble() * 2 - 1)),
-        [1, 4, 240]);
+      Float32List.fromList(
+        List.generate(4 * 240, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [1, 4, 240],
+    );
     final want = model.run({'X': x}, ['Y'])['Y']!;
     await model.parallelize(workers: 3, poolConv: true);
     try {
       final got = (await model.runAsync({'X': x}, ['Y']))['Y']!;
       expect(got.shape, want.shape);
-      expect(got.asFloatList(), want.asFloatList(),
-          reason: 'pooled 1-D conv must be bitwise-identical');
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'pooled 1-D conv must be bitwise-identical',
+      );
     } finally {
       model.dispose();
     }
@@ -263,27 +348,37 @@ void main() {
       ..input.add(ValueInfoProto()..name = 'X')
       ..input.add(ValueInfoProto()..name = 'B')
       ..output.add(ValueInfoProto()..name = 'Y')
-      ..node.add(NodeProto()
-        ..opType = 'MatMul'
-        ..input.addAll(['X', 'B'])
-        ..output.add('Y'));
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+      ..node.add(
+        NodeProto()
+          ..opType = 'MatMul'
+          ..input.addAll(['X', 'B'])
+          ..output.add('Y'),
+      );
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(
-        Float32List.fromList(
-            List.generate(6 * 8, (_) => _rng.nextDouble() * 2 - 1)),
-        [6, 8]);
+      Float32List.fromList(
+        List.generate(6 * 8, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [6, 8],
+    );
     final b = Tensor.float(
-        Float32List.fromList(
-            List.generate(4 * 17 * 8 * 5, (_) => _rng.nextDouble() * 2 - 1)),
-        [4, 17, 8, 5]);
+      Float32List.fromList(
+        List.generate(4 * 17 * 8 * 5, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [4, 17, 8, 5],
+    );
     final want = model.run({'X': x, 'B': b}, ['Y'])['Y']!;
     await model.parallelize(workers: 3, minWeightElements: 1 << 30);
     try {
       final got = (await model.runAsync({'X': x, 'B': b}, ['Y']))['Y']!;
       expect(got.shape, want.shape);
-      expect(got.asFloatList(), want.asFloatList(),
-          reason: 'batch-split matmul must be bitwise-identical');
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'batch-split matmul must be bitwise-identical',
+      );
     } finally {
       model.dispose();
     }
@@ -296,27 +391,37 @@ void main() {
       ..input.add(ValueInfoProto()..name = 'X')
       ..input.add(ValueInfoProto()..name = 'B')
       ..output.add(ValueInfoProto()..name = 'Y')
-      ..node.add(NodeProto()
-        ..opType = 'MatMul'
-        ..input.addAll(['X', 'B'])
-        ..output.add('Y'));
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+      ..node.add(
+        NodeProto()
+          ..opType = 'MatMul'
+          ..input.addAll(['X', 'B'])
+          ..output.add('Y'),
+      );
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(
-        Float32List.fromList(
-            List.generate(1 * 8 * 64 * 96, (_) => _rng.nextDouble() * 2 - 1)),
-        [1, 8, 64, 96]);
+      Float32List.fromList(
+        List.generate(1 * 8 * 64 * 96, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [1, 8, 64, 96],
+    );
     final b = Tensor.float(
-        Float32List.fromList(
-            List.generate(96 * 5, (_) => _rng.nextDouble() * 2 - 1)),
-        [96, 5]);
+      Float32List.fromList(
+        List.generate(96 * 5, (_) => _rng.nextDouble() * 2 - 1),
+      ),
+      [96, 5],
+    );
     final want = model.run({'X': x, 'B': b}, ['Y'])['Y']!;
     await model.parallelize(workers: 3, minWeightElements: 1 << 30);
     try {
       final got = (await model.runAsync({'X': x, 'B': b}, ['Y']))['Y']!;
       expect(got.shape, want.shape);
-      expect(got.asFloatList(), want.asFloatList(),
-          reason: 'row-split matmul must be bitwise-identical');
+      expect(
+        got.asFloatList(),
+        want.asFloatList(),
+        reason: 'row-split matmul must be bitwise-identical',
+      );
     } finally {
       model.dispose();
     }
@@ -326,14 +431,19 @@ void main() {
     final g = GraphProto()
       ..input.add(ValueInfoProto()..name = 'X')
       ..output.add(ValueInfoProto()..name = 'Y')
-      ..node.add(NodeProto()
-        ..opType = 'Neg'
-        ..input.add('X')
-        ..output.add('Y'));
-    final model =
-        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+      ..node.add(
+        NodeProto()
+          ..opType = 'Neg'
+          ..input.add('X')
+          ..output.add('Y'),
+      );
+    final model = OnnxModel.fromBytes(
+      (ModelProto()..graph = g).writeToBuffer(),
+    );
     final x = Tensor.float(Float32List.fromList([1, -2, 3]), [3]);
-    expect((await model.runAsync({'X': x}, ['Y']))['Y']!.asFloatList(),
-        model.run({'X': x}, ['Y'])['Y']!.asFloatList());
+    expect(
+      (await model.runAsync({'X': x}, ['Y']))['Y']!.asFloatList(),
+      model.run({'X': x}, ['Y'])['Y']!.asFloatList(),
+    );
   });
 }

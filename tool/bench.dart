@@ -31,13 +31,17 @@ Future<void> main(List<String> args) async {
   final experiments = experimentArg == null || experimentArg.isEmpty
       ? <OnnxExperiment>{}
       : experimentArg
-          .split(',')
-          .map((name) =>
-              OnnxExperiment.values.firstWhere((value) => value.name == name))
-          .toSet();
+            .split(',')
+            .map(
+              (name) => OnnxExperiment.values.firstWhere(
+                (value) => value.name == name,
+              ),
+            )
+            .toSet();
 
   final meta = ModelProto.fromBuffer(
-      Uint8List.fromList(File(modelPath).readAsBytesSync()));
+    Uint8List.fromList(File(modelPath).readAsBytesSync()),
+  );
   final initNames = meta.graph.initializer.map((t) => t.name).toSet();
   final model = loadOnnxModel(modelPath, experiments: experiments);
   final outName = meta.graph.output.first.name;
@@ -84,7 +88,9 @@ Future<void> main(List<String> args) async {
 
   if (workers > 0) {
     await model.parallelize(
-        workers: workers, poolConv: args.contains('--poolconv'));
+      workers: workers,
+      poolConv: args.contains('--poolconv'),
+    );
   }
   Future<Map<String, Tensor>> once({ExecutionProfile? profile}) => workers > 0
       ? model.runAsync(feed, [outName], profile: profile)
@@ -104,16 +110,23 @@ Future<void> main(List<String> args) async {
   final mean = times.reduce((a, b) => a + b) / times.length;
   final out = (await once())[outName]!;
   model.dispose();
-  stderr.writeln('output $outName: ${out.shape} '
-      'first4=${out.asFloatList().take(4).map((v) => v.toStringAsFixed(5)).toList()}');
-  print('wall: min=${(times.first / 1000).toStringAsFixed(1)}ms '
-      'mean=${(mean / 1000).toStringAsFixed(1)}ms over ${times.length} iters '
-      '(seq=$seq${workers > 0 ? ', workers=$workers' : ''})');
+  stderr.writeln(
+    'output $outName: ${out.shape} '
+    'first4=${out.asFloatList().take(4).map((v) => v.toStringAsFixed(5)).toList()}',
+  );
+  print(
+    'wall: min=${(times.first / 1000).toStringAsFixed(1)}ms '
+    'mean=${(mean / 1000).toStringAsFixed(1)}ms over ${times.length} iters '
+    '(seq=$seq${workers > 0 ? ', workers=$workers' : ''})',
+  );
   print(profile.report());
+  print(
+    'rss: peak=${(ProcessInfo.maxRss / (1 << 20)).toStringAsFixed(0)}MB '
+    'end=${(ProcessInfo.currentRss / (1 << 20)).toStringAsFixed(0)}MB',
+  );
   if (args.contains('--nodes')) {
     final at = args.indexOf('--nodes');
-    final next =
-        at + 1 < args.length ? int.tryParse(args[at + 1]) : null;
+    final next = at + 1 < args.length ? int.tryParse(args[at + 1]) : null;
     print(profile.nodesReport(limit: next ?? 20));
   }
 }

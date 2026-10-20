@@ -1,0 +1,18 @@
+wall: min=32861.5ms mean=32861.5ms over 1 iters (seq=16, workers=16)
+op                      calls        ms   share
+Conv                      222   20253.5   61.9%
+MatMul                    432    5234.2   16.0%
+ConvTranspose               3    1728.6    5.3%
+Relu                      152    1303.1    4.0%
+Add                       217    1210.1    3.7%
+Pad                        98     758.5    2.3%
+BatchNormalization         75     588.5    1.8%
+Sub                       109     438.9    1.3%
+Concat                    110     404.5    1.2%
+Gather                    108     378.2    1.2%
+Mul                       110     339.3    1.0%
+Sigmoid                     1      48.9    0.1%
+Unsqueeze                 144       4.9    0.0%
+Reshape                    72       1.3    0.0%
+Shape                      36       0.7    0.0%
+total                           32693.3
