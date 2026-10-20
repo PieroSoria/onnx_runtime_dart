@@ -21,6 +21,11 @@ import 'dart:typed_data';
 /// room for the A-row tiles and output). Panel width is derived from this and
 /// `k` so the panel stays resident across the full m loop.
 const int _panelBytes = 192 * 1024;
+const int _maxReusablePanelBytes = 1024 * 1024;
+
+// Kernel calls are synchronous and isolates do not share statics, so this
+// bounded scratch buffer can be reused without cross-run or cross-worker races.
+Float32x4List _panelScratch = Float32x4List(0);
 
 /// Computes `out[m×n] += a[m×k] · b[k×n]` (row-major, at the given flat
 /// offsets). `out` is assumed zero-initialized (fresh allocation).
@@ -68,16 +73,23 @@ void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
   final singlePanel = panel >= n;
 
   final panelN4 = (panel + 3) >> 2;
-  final bp = Float32x4List(k * panelN4);
+  final panelLength = k * panelN4;
+  final Float32x4List bp;
+  if (panelLength * 16 <= _maxReusablePanelBytes) {
+    if (_panelScratch.length < panelLength) {
+      _panelScratch = Float32x4List(panelLength);
+    }
+    bp = _panelScratch;
+  } else {
+    bp = Float32x4List(panelLength);
+  }
   final bpF = bp.buffer.asFloat32List();
 
-  final lane = Float32x4List(1);
-  final laneF = lane.buffer.asFloat32List();
   void storeLane(Float32x4 v, int outIdx, int cols) {
-    lane[0] = v;
-    for (int c = 0; c < cols; c++) {
-      out[outIdx + c] = laneF[c];
-    }
+    out[outIdx] = v.x;
+    if (cols > 1) out[outIdx + 1] = v.y;
+    if (cols > 2) out[outIdx + 2] = v.z;
+    if (cols > 3) out[outIdx + 3] = v.w;
   }
 
   for (int p0 = 0; p0 < n; p0 += panel) {
