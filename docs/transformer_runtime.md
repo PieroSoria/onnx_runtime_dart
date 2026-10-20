@@ -180,9 +180,10 @@ The portable ORT oracle suite runs under both JavaScript and WebAssembly.
 
 ### Emulator measurements (Android API 36, Pixel 7a AVD, 8 GB RAM, 16 GB data)
 
-`.tmp/device_harness` is a minimal Flutter (Android) app that loads both graphs
-from `/data/local/tmp/gemma` (pushed via adb) and measures wall time and VmRSS.
-It reuses the multimodal oracle bins for a 10-token prompt. `largeHeap` is on.
+A minimal Flutter (Android) harness (scratch tooling, not part of this
+package) loaded both graphs from `/data/local/tmp/gemma` (pushed via adb) and
+measured wall time and VmRSS. It reused the multimodal oracle bins for a
+10-token prompt. `largeHeap` is on.
 Results (`/data/local/tmp/gemma` push, debug APK):
 
 | graph          | load  | run (perf)     | VmRSS after |
