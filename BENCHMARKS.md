@@ -85,3 +85,46 @@ ResNet18 47.9 ms / 14.9 ms. Gap ≈ 15× / 6.9× single-threaded; Conv is
 Per-op shares come from `ExecutionProfile` (`--iters` accumulate). Regenerate
 the ORT reference with the snippet in `git log` for this file or ad-hoc via
 `.venv/bin/python` + `onnxruntime`.
+
+## LaMa inpainting, 1024² (`lama_manga_large_1024.onnx`, 196 MB)
+
+Windows dev box, 32 logical cores, `dart run tool/bench.dart <model> --iters 1`
+(min of one timed run after warmup; peak RSS sampled across all Dart processes).
+Inputs are synthesized (`image [1,3,1024,1024]`, `mask [1,1,1024,1024]`), so the
+numbers measure the full graph, not pre/post-processing.
+
+| Date | Mode | wall | Conv | MatMul | ConvTranspose | Pad | peak RSS |
+|---|---|---|---|---|---|---|---|
+| 2026-10-20 | `run()` baseline (full im2col workspace) | 177.0 s | 151.0 s | 10.3 s | 6.1 s | 5.2 s | ~15 GB |
+| 2026-10-20 | `run()` + chunked im2col / 32 MiB cap | 108.7 s | 89.4 s | 9.7 s | 5.9 s | 0.4 s | <0.5 GB |
+| 2026-10-20 | `runAsync()`, 16 workers, `poolConv: true` | **27.9 s** | 19.4 s | 3.8 s | 1.2 s | 0.5 s | 1.2 GB |
+
+What moved the needle:
+
+- **Bounded im2col.** The 1024² 384→128 3×3 convs need
+  `C·kh·kw·oh·ow ≈ 14 GB` for a full column matrix. `opConv` now chunks over
+  output rows (32 MiB panel), and the graph only keeps a workspace when it is
+  under 8 M floats. Winograd tiles its own row bands and no longer allocates
+  im2col at all.
+- **2 MiB GEMM panels + small-M kernel.** Conv `k` is large, so the default
+  192 KiB B-panel re-read the weights hundreds of times per call; 2 MiB keeps
+  the panel in L2. The final 3-channel 7×7 conv (`m=3`) now streams B once
+  instead of packing a panel for three rows (21.7 s → 1.6 s pooled).
+- **`Pad` row copy.** Reflect/edge padding on 1024² tensors now maps indices
+  once per axis and copies whole rows (`setRange`); 10.7 s → 0.45 s.
+- **Isolate fan-out.** Conv is split by output rows, with each worker receiving
+  only its input-row band (`TransferableTypedData`); `ConvTranspose` uses the
+  same scheme with the transposed-conv halo. Runtime MatMul operands are split
+  along A (large) or B's leading batch (FFC twiddles) instead of copying the
+  whole activation to every worker. Workers also reuse a persistent im2col
+  scratch.
+- **Adaptive scope.** Depthwise/grouped convs and `output_shape` ConvTranspose
+  stay local; MatMul weights below `minWeightElements` stay local.
+
+32 workers gave no further gain (28.5 s): at this point the main isolate is the
+bottleneck (per-conv band slicing, slab stitching, and elementwise ops). `Conv`
+is still 19.4 s (~70% of wall); a single 384→128 130² conv reaches
+~120 GFLOP/s aggregate on the 16-worker pool, and the remaining headroom is in
+Winograd/F(2×2,3×3) for the many 3×3 `pads=0` FFC convs and in parallelizing
+large elementwise ops.
+

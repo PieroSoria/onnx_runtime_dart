@@ -194,6 +194,13 @@ final out = await model.runAsync(inputs, ['output']); // bitwise == run()
 model.dispose();                            // shuts the workers down
 ```
 
+Convolutions stay on the main isolate by default because they already use
+cached SIMD GEMM. Pass `poolConv: true` for large activation maps (e.g. 1024²
+inpainting): conv output rows, banded `ConvTranspose`, and runtime MatMul
+batches are fanned out with row-band slicing, and all results remain
+bitwise-identical to `run()`. Per-node timings are available through
+`profile.nodesReport()` after an `ExecutionProfile` run.
+
 ## Install
 
 ```yaml

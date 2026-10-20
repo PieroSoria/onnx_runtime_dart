@@ -9,13 +9,17 @@ import 'dart:typed_data';
 /// offsets). `out` is assumed zero-initialized (fresh allocation).
 void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
     Float32List out, int outOff, int m, int k, int n,
-    {bool narrowDirect = false}) {
+    {bool narrowDirect = false, int? outStride, int panelBytes = 0}) {
+  // `outStride` lets a caller write a column slab into a wider row layout
+  // (banded convolution: output rows are `oh*ow` apart, the slab is `n` wide).
+  final oStride = outStride ?? n;
   // 4-row unroll: each loaded b value is reused for 4 output rows, which
   // quarters B memory traffic vs the naive i-k-j loop.
   int i = 0;
   for (; i + 4 <= m; i += 4) {
     final a0 = aOff + i * k, a1 = a0 + k, a2 = a1 + k, a3 = a2 + k;
-    final o0 = outOff + i * n, o1 = o0 + n, o2 = o1 + n, o3 = o2 + n;
+    final o0 = outOff + i * oStride, o1 = o0 + oStride, o2 = o1 + oStride,
+        o3 = o2 + oStride;
     for (int kk = 0; kk < k; kk++) {
       final v0 = a[a0 + kk], v1 = a[a1 + kk], v2 = a[a2 + kk], v3 = a[a3 + kk];
       final bRow = bOff + kk * n;
@@ -30,7 +34,7 @@ void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
   }
   for (; i < m; i++) {
     final aRow = aOff + i * k;
-    final oRow = outOff + i * n;
+    final oRow = outOff + i * oStride;
     for (int kk = 0; kk < k; kk++) {
       final v = a[aRow + kk];
       final bRow = bOff + kk * n;

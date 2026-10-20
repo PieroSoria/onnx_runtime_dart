@@ -179,6 +179,48 @@ void main() {
     }
   });
 
+  test('pooled ConvTranspose fan-out == sync, bitwise', () async {
+    final g = GraphProto()
+      ..input.add(ValueInfoProto()..name = 'X')
+      ..output.add(ValueInfoProto()..name = 'Y')
+      ..initializer.addAll([
+        _floatInit('W', [4, 6, 3, 3]),
+        _floatInit('B', [6]),
+      ])
+      ..node.add(NodeProto()
+        ..opType = 'ConvTranspose'
+        ..input.addAll(['X', 'W', 'B'])
+        ..output.add('Y')
+        ..attribute.addAll([
+          AttributeProto()
+            ..name = 'strides'
+            ..ints.addAll([Int64(2), Int64(2)]),
+          AttributeProto()
+            ..name = 'pads'
+            ..ints.addAll(
+                [Int64(1), Int64(1), Int64(1), Int64(1)]),
+          AttributeProto()
+            ..name = 'output_padding'
+            ..ints.addAll([Int64(1), Int64(1)]),
+        ]));
+    final model =
+        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+    final x = Tensor.float(
+        Float32List.fromList(
+            List.generate(4 * 8 * 6, (_) => _rng.nextDouble() * 2 - 1)),
+        [1, 4, 8, 6]);
+    final want = model.run({'X': x}, ['Y'])['Y']!;
+    await model.parallelize(workers: 3, poolConv: true);
+    try {
+      final got = (await model.runAsync({'X': x}, ['Y']))['Y']!;
+      expect(got.shape, want.shape);
+      expect(got.asFloatList(), want.asFloatList(),
+          reason: 'banded ConvTranspose must be bitwise-identical');
+    } finally {
+      model.dispose();
+    }
+  });
+
   test('pooled 1-D conv fan-out == sync, bitwise', () async {
     final g = GraphProto()
       ..input.add(ValueInfoProto()..name = 'X')
@@ -209,6 +251,72 @@ void main() {
       expect(got.shape, want.shape);
       expect(got.asFloatList(), want.asFloatList(),
           reason: 'pooled 1-D conv must be bitwise-identical');
+    } finally {
+      model.dispose();
+    }
+  });
+
+  test('batched runtime MatMul fan-out == sync, bitwise', () async {
+    // A is small, B carries the batch (FFC twiddle layout). Workers split B's
+    // leading batch dimension.
+    final g = GraphProto()
+      ..input.add(ValueInfoProto()..name = 'X')
+      ..input.add(ValueInfoProto()..name = 'B')
+      ..output.add(ValueInfoProto()..name = 'Y')
+      ..node.add(NodeProto()
+        ..opType = 'MatMul'
+        ..input.addAll(['X', 'B'])
+        ..output.add('Y'));
+    final model =
+        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+    final x = Tensor.float(
+        Float32List.fromList(
+            List.generate(6 * 8, (_) => _rng.nextDouble() * 2 - 1)),
+        [6, 8]);
+    final b = Tensor.float(
+        Float32List.fromList(
+            List.generate(4 * 17 * 8 * 5, (_) => _rng.nextDouble() * 2 - 1)),
+        [4, 17, 8, 5]);
+    final want = model.run({'X': x, 'B': b}, ['Y'])['Y']!;
+    await model.parallelize(workers: 3, minWeightElements: 1 << 30);
+    try {
+      final got = (await model.runAsync({'X': x, 'B': b}, ['Y']))['Y']!;
+      expect(got.shape, want.shape);
+      expect(got.asFloatList(), want.asFloatList(),
+          reason: 'batch-split matmul must be bitwise-identical');
+    } finally {
+      model.dispose();
+    }
+  });
+
+  test('runtime MatMul row fan-out == sync, bitwise', () async {
+    // B is a graph input, not an initializer, so the weight-partition path
+    // can't see it: the executor must row-split A and replicate B instead.
+    final g = GraphProto()
+      ..input.add(ValueInfoProto()..name = 'X')
+      ..input.add(ValueInfoProto()..name = 'B')
+      ..output.add(ValueInfoProto()..name = 'Y')
+      ..node.add(NodeProto()
+        ..opType = 'MatMul'
+        ..input.addAll(['X', 'B'])
+        ..output.add('Y'));
+    final model =
+        OnnxModel.fromBytes((ModelProto()..graph = g).writeToBuffer());
+    final x = Tensor.float(
+        Float32List.fromList(
+            List.generate(1 * 8 * 64 * 96, (_) => _rng.nextDouble() * 2 - 1)),
+        [1, 8, 64, 96]);
+    final b = Tensor.float(
+        Float32List.fromList(
+            List.generate(96 * 5, (_) => _rng.nextDouble() * 2 - 1)),
+        [96, 5]);
+    final want = model.run({'X': x, 'B': b}, ['Y'])['Y']!;
+    await model.parallelize(workers: 3, minWeightElements: 1 << 30);
+    try {
+      final got = (await model.runAsync({'X': x, 'B': b}, ['Y']))['Y']!;
+      expect(got.shape, want.shape);
+      expect(got.asFloatList(), want.asFloatList(),
+          reason: 'row-split matmul must be bitwise-identical');
     } finally {
       model.dispose();
     }

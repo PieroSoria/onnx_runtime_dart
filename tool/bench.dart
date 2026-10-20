@@ -110,6 +110,12 @@ Future<void> main(List<String> args) async {
       'mean=${(mean / 1000).toStringAsFixed(1)}ms over ${times.length} iters '
       '(seq=$seq${workers > 0 ? ', workers=$workers' : ''})');
   print(profile.report());
+  if (args.contains('--nodes')) {
+    final at = args.indexOf('--nodes');
+    final next =
+        at + 1 < args.length ? int.tryParse(args[at + 1]) : null;
+    print(profile.nodesReport(limit: next ?? 20));
+  }
 }
 
 String? flagString(List<String> args, String name) {

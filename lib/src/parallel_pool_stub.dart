@@ -28,12 +28,36 @@ class GemmPool {
   Future<Float32List> matmul(String name, Float32List a, int m) =>
       throw UnsupportedError('no pool on this platform');
 
+  Future<Float32List> matmulRuntime(
+          Float32List a, int m, Float32List b, int k, int n) =>
+      throw UnsupportedError('no pool on this platform');
+
+  Future<Float32List> matmulBatched(
+          Float32List a, int m, int k, Float32List b, int batch, int n) =>
+      throw UnsupportedError('no pool on this platform');
+
   Future<Float32List> conv(String name, Float32List x, List<int> xShape,
           {required List<int>? strides,
           required List<int>? pads,
           required List<int>? dilations,
           required int group,
           required String autoPad,
+          required int kernelH,
+          required int n,
+          required int m,
+          required int oh,
+          required int ow,
+          bool depthwise = false}) =>
+      throw UnsupportedError('no pool on this platform');
+
+  Future<Float32List> convTranspose(String name, Float32List x,
+          List<int> xShape,
+          {required List<int>? strides,
+          required List<int>? pads,
+          required List<int>? dilations,
+          required List<int>? outputPadding,
+          required int group,
+          required int kernelH,
           required int n,
           required int m,
           required int oh,

@@ -58,9 +58,12 @@ void _workerMain(SendPort toMain) {
         (map['ack'] as SendPort).send(true);
       case 'conv':
         final (w, bias) = convWeights[map['name'] as String]!;
+        final raw = map['x'];
+        final xf = raw is TransferableTypedData
+            ? raw.materialize().asFloat32List()
+            : raw as Float32List;
         final slab = nn.opConv(
-          Tensor.float(
-              map['x'] as Float32List, (map['xshape'] as List).cast<int>()),
+          Tensor.float(xf, (map['xshape'] as List).cast<int>()),
           w,
           bias,
           strides: (map['strides'] as List?)?.cast<int>(),
@@ -70,8 +73,71 @@ void _workerMain(SendPort toMain) {
           autoPad: map['autoPad'] as String,
           bandStart: map['b0'] as int,
           bandEnd: map['b1'] as int,
+          srcRowStart: map['srcRowStart'] as int?,
+          srcRows: map['srcRows'] as int?,
         );
-        (map['reply'] as SendPort).send({'id': map['id'], 'out': slab.f!});
+        (map['reply'] as SendPort).send({
+          'id': map['id'],
+          'out': TransferableTypedData.fromList([slab.f!]),
+        });
+      case 'convtranspose':
+        final (w, bias) = convWeights[map['name'] as String]!;
+        final raw = map['x'];
+        final xf = raw is TransferableTypedData
+            ? raw.materialize().asFloat32List()
+            : raw as Float32List;
+        final slab = nn.opConvTranspose(
+          Tensor.float(xf, (map['xshape'] as List).cast<int>()),
+          w,
+          bias,
+          strides: (map['strides'] as List?)?.cast<int>(),
+          pads: (map['pads'] as List?)?.cast<int>(),
+          dilations: (map['dilations'] as List?)?.cast<int>(),
+          outputPadding: (map['outputPadding'] as List?)?.cast<int>(),
+          group: map['group'] as int,
+          bandStart: map['b0'] as int,
+          bandEnd: map['b1'] as int,
+          srcRowStart: map['srcRowStart'] as int?,
+          srcRows: map['srcRows'] as int?,
+        );
+        (map['reply'] as SendPort)
+            .send({'id': map['id'], 'out': TransferableTypedData.fromList([slab.f!])});
+      case 'matmulBatched':
+        // A[128×128] times a batched twiddle tensor B[batch×128×65]: split
+        // B along its leading batch dim; A is tiny and replicated.
+        final rawA = map['a'];
+        final a = rawA is TransferableTypedData
+            ? rawA.materialize().asFloat32List()
+            : rawA as Float32List;
+        final rawB = map['b'];
+        final b = rawB is TransferableTypedData
+            ? rawB.materialize().asFloat32List()
+            : rawB as Float32List;
+        final batches = map['batches'] as int;
+        final m = map['m'] as int;
+        final k = map['k'] as int;
+        final n = map['n'] as int;
+        final out = Float32List(batches * m * n);
+        for (int bi = 0; bi < batches; bi++) {
+          gemm.matmulKernel(a, 0, b, bi * k * n, out, bi * m * n, m, k, n);
+        }
+        (map['reply'] as SendPort)
+            .send({'id': map['id'], 'out': TransferableTypedData.fromList([out])});
+      case 'matmulNow':
+        // Runtime B (computed inside the graph, e.g. the FFT twiddle
+        // matrices): A is row-sliced by the caller, B is small and repeated.
+        final rawA = map['a'];
+        final a = rawA is TransferableTypedData
+            ? rawA.materialize().asFloat32List()
+            : rawA as Float32List;
+        final b = map['b'] as Float32List;
+        final rows = map['rows'] as int;
+        final k = map['k'] as int;
+        final n = map['n'] as int;
+        final out = Float32List(rows * n);
+        gemm.matmulKernel(a, 0, b, 0, out, 0, rows, k, n);
+        (map['reply'] as SendPort)
+            .send({'id': map['id'], 'out': TransferableTypedData.fromList([out])});
       default: // 'matmul'
         final s = slices[map['name'] as String]!;
         final a = map['a'] as Float32List;
@@ -170,7 +236,11 @@ class GemmPool {
     replies.listen((msg) {
       final map = msg as Map;
       final entry = pool._pending.remove(map['id'] as int);
-      entry?.call(-1, map['out'] as Float32List); // worker id baked into id
+      final raw = map['out'];
+      final slab = raw is TransferableTypedData
+          ? raw.materialize().asFloat32List()
+          : raw as Float32List;
+      entry?.call(-1, slab); // worker id baked into id
     });
     return pool;
   }
@@ -205,9 +275,88 @@ class GemmPool {
     return completer.future;
   }
 
+  /// `out[m × n] = a[m × k] · b[k × n]` for a B computed at run time (FFT
+  /// twiddles, attention weights, …). B is small and shipped to every worker;
+  /// A is row-sliced so each worker receives only its band. Row splitting
+  /// leaves the dot-product order untouched, so results stay bitwise equal.
+  Future<Float32List> matmulRuntime(
+      Float32List a, int m, Float32List b, int k, int n) {
+    final out = Float32List(m * n);
+    final completer = Completer<Float32List>();
+    final w = _workers.length;
+    final base = m ~/ w, rem = m % w;
+    int remaining = 0, row = 0;
+    for (int wk = 0; wk < w; wk++) {
+      final rows = base + (wk < rem ? 1 : 0);
+      if (rows == 0) continue;
+      final id = _nextId++;
+      final r0 = row, r1 = row + rows;
+      row = r1;
+      remaining++;
+      _pending[id] = (_, slab) {
+        out.setRange(r0 * n, r1 * n, slab, 0);
+        if (--remaining == 0) completer.complete(out);
+      };
+      final slice = Float32List(rows * k);
+      slice.setRange(0, rows * k, a, r0 * k);
+      _workers[wk].send({
+        'op': 'matmulNow',
+        'id': id,
+        'a': TransferableTypedData.fromList([slice]),
+        'b': b,
+        'rows': rows,
+        'k': k,
+        'n': n,
+        'reply': _replies.sendPort,
+      });
+    }
+    if (remaining == 0) completer.complete(out);
+    return completer.future;
+  }
+
+  /// Batched runtime MatMul `A[m×k] · B[batch×k×n]`, splitting B's batch
+  /// dimension across workers (FFC's per-batch twiddle matrices).
+  Future<Float32List> matmulBatched(
+      Float32List a, int m, int k, Float32List b, int batch, int n) {
+    final out = Float32List(batch * m * n);
+    final completer = Completer<Float32List>();
+    final w = _workers.length;
+    final base = batch ~/ w, rem = batch % w;
+    int remaining = 0, b0 = 0;
+    for (int wk = 0; wk < w; wk++) {
+      final batches = base + (wk < rem ? 1 : 0);
+      if (batches == 0) continue;
+      final id = _nextId++;
+      final start = b0, end = b0 + batches;
+      b0 = end;
+      remaining++;
+      _pending[id] = (_, slab) {
+        out.setRange(start * m * n, end * m * n, slab, 0);
+        if (--remaining == 0) completer.complete(out);
+      };
+      final slice = Float32List(batches * k * n);
+      slice.setRange(0, slice.length, b, start * k * n);
+      _workers[wk].send({
+        'op': 'matmulBatched',
+        'id': id,
+        'a': a,
+        'b': TransferableTypedData.fromList([slice]),
+        'batches': batches,
+        'm': m,
+        'k': k,
+        'n': n,
+        'reply': _replies.sendPort,
+      });
+    }
+    if (remaining == 0) completer.complete(out);
+    return completer.future;
+  }
+
   /// 2-D conv fanned out by output-row bands: each worker computes rows
   /// `[cut_w, cut_{w+1})` against its full weight replica, and the slabs are
-  /// stitched back into the `[n, m, oh, ow]` output.
+  /// stitched back into the `[n, m, oh, ow]` output. Each worker receives only
+  /// the input rows its band reads (plus the kernel halo), shipped as
+  /// `TransferableTypedData` so the slice is moved, not copied twice.
   Future<Float32List> conv(
     String name,
     Float32List x,
@@ -217,10 +366,12 @@ class GemmPool {
     required List<int>? dilations,
     required int group,
     required String autoPad,
+    required int kernelH,
     required int n,
     required int m,
     required int oh,
     required int ow,
+    bool depthwise = false,
   }) {
     final out = Float32List(n * m * oh * ow);
     final completer = Completer<Float32List>();
@@ -235,6 +386,7 @@ class GemmPool {
       cut += rows;
       remaining++;
     }
+    final c = xShape[1], inH = xShape[2], inW = xShape[3];
     for (final (wk, b0, b1) in tasks) {
       final id = _nextId++;
       _pending[id] = (_, slab) {
@@ -245,12 +397,46 @@ class GemmPool {
         }
         if (--remaining == 0) completer.complete(out);
       };
+      final Float32List xPart;
+      final List<int> xPartShape;
+      int? srcRowStart;
+      int? srcRows;
+      if (depthwise) {
+        xPart = x;
+        xPartShape = xShape;
+      } else {
+        final (gs, ge) = nn.convInputRowRange(
+          inH: inH,
+          kernelH: kernelH,
+          bandStart: b0,
+          bandEnd: b1,
+          stride: strides?[0] ?? 1,
+          dilation: dilations?[0] ?? 1,
+          padTop: pads?[0],
+          autoPad: autoPad,
+        );
+        final rows = ge - gs;
+        final slice = Float32List(n * c * rows * inW);
+        for (int img = 0; img < n; img++) {
+          for (int ch = 0; ch < c; ch++) {
+            final srcBase = (img * c + ch) * inH * inW + gs * inW;
+            final dstBase = (img * c + ch) * rows * inW;
+            slice.setRange(dstBase, dstBase + rows * inW, x, srcBase);
+          }
+        }
+        xPart = slice;
+        xPartShape = [n, c, rows, inW];
+        srcRowStart = gs;
+        srcRows = inH;
+      }
       _workers[wk].send({
         'op': 'conv',
         'id': id,
         'name': name,
-        'x': x,
-        'xshape': xShape,
+        'x': depthwise
+            ? xPart
+            : TransferableTypedData.fromList([xPart]),
+        'xshape': xPartShape,
         'strides': strides,
         'pads': pads,
         'dilations': dilations,
@@ -258,6 +444,89 @@ class GemmPool {
         'autoPad': autoPad,
         'b0': b0,
         'b1': b1,
+        'srcRowStart': srcRowStart,
+        'srcRows': srcRows,
+        'reply': _replies.sendPort,
+      });
+    }
+    return completer.future;
+  }
+
+  /// Transposed 2-D conv fanned out by output-row bands. Each worker gets the
+  /// input rows that contribute to its band (kernel halo included) and writes
+  /// a [m, bandRows, ow] slab, stitched back into [n, m, oh, ow].
+  Future<Float32List> convTranspose(
+    String name,
+    Float32List x,
+    List<int> xShape, {
+    required List<int>? strides,
+    required List<int>? pads,
+    required List<int>? dilations,
+    required List<int>? outputPadding,
+    required int group,
+    required int kernelH,
+    required int n,
+    required int m,
+    required int oh,
+    required int ow,
+  }) {
+    final out = Float32List(n * m * oh * ow);
+    final completer = Completer<Float32List>();
+    final w = _workers.length;
+    final base = oh ~/ w, rem = oh % w;
+    int remaining = 0, cut = 0;
+    final tasks = <(int, int, int)>[];
+    for (int wk = 0; wk < w; wk++) {
+      final rows = base + (wk < rem ? 1 : 0);
+      if (rows == 0) continue;
+      tasks.add((wk, cut, cut + rows));
+      cut += rows;
+      remaining++;
+    }
+    final c = xShape[1], inH = xShape[2], inW = xShape[3];
+    for (final (wk, b0, b1) in tasks) {
+      final id = _nextId++;
+      _pending[id] = (_, slab) {
+        final rows = b1 - b0;
+        for (int img = 0; img < n * m; img++) {
+          out.setRange((img * oh + b0) * ow, (img * oh + b1) * ow, slab,
+              img * rows * ow);
+        }
+        if (--remaining == 0) completer.complete(out);
+      };
+      final (gs, ge) = nn.convTransposeInputRowRange(
+        inH: inH,
+        kernelH: kernelH,
+        bandStart: b0,
+        bandEnd: b1,
+        stride: strides?[0] ?? 1,
+        dilation: dilations?[0] ?? 1,
+        padTop: pads?[0] ?? 0,
+      );
+      final rows = ge - gs;
+      final slice = Float32List(n * c * rows * inW);
+      for (int img = 0; img < n; img++) {
+        for (int ch = 0; ch < c; ch++) {
+          final srcBase = (img * c + ch) * inH * inW + gs * inW;
+          final dstBase = (img * c + ch) * rows * inW;
+          slice.setRange(dstBase, dstBase + rows * inW, x, srcBase);
+        }
+      }
+      _workers[wk].send({
+        'op': 'convtranspose',
+        'id': id,
+        'name': name,
+        'x': TransferableTypedData.fromList([slice]),
+        'xshape': [n, c, rows, inW],
+        'strides': strides,
+        'pads': pads,
+        'dilations': dilations,
+        'outputPadding': outputPadding,
+        'group': group,
+        'b0': b0,
+        'b1': b1,
+        'srcRowStart': gs,
+        'srcRows': inH,
         'reply': _replies.sendPort,
       });
     }

@@ -28,7 +28,23 @@ class ExecutionProfile {
   final Map<String, int> callsByOp = {};
   final Map<String, int> microsByOp = {};
 
+  /// Per-node timings, in execution order. Useful for finding the single
+  /// conv/matmul that dominates a model; see [nodesReport].
+  final List<NodeProfile> nodes = [];
+
   int get totalMicros => microsByOp.values.fold(0, (a, b) => a + b);
+
+  /// Slowest nodes first, one line each: `opType  total-ms  node name`.
+  String nodesReport({int limit = 20}) {
+    final sorted = [...nodes]..sort((a, b) => b.micros.compareTo(a.micros));
+    final b = StringBuffer('${'op'.padRight(18)}${'ms'.padLeft(10)}  node\n');
+    for (final n in sorted.take(limit)) {
+      b.writeln('${n.opType.padRight(18)}'
+          '${(n.micros / 1000).toStringAsFixed(1).padLeft(10)}  ${n.name}'
+          '${n.detail.isEmpty ? '' : '  ${n.detail}'}');
+    }
+    return b.toString();
+  }
 
   /// Op types sorted by cumulative time, one line each:
   /// `opType  calls  total-ms  share%`.
@@ -49,6 +65,15 @@ class ExecutionProfile {
         '${(total / 1000).toStringAsFixed(1).padLeft(10)}');
     return b.toString();
   }
+}
+
+/// One node's wall time, captured when a run is profiled.
+class NodeProfile {
+  final String name;
+  final String opType;
+  final int micros;
+  final String detail;
+  const NodeProfile(this.name, this.opType, this.micros, [this.detail = '']);
 }
 
 /// Disabled-by-default execution strategies intended for hardware A/B tests.
@@ -744,6 +769,9 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
       if (node.opType == 'Conv' && poolConv) {
         final w = node.input.length > 1 ? _initializers[node.input[1]] : null;
         final a = _attrsFor(node);
+        // Band slicing assumes independent output rows per group; depthwise /
+        // grouped convs fall back to the local path.
+        if ((a.getInt('group') ?? 1) != 1) continue;
         final strides = a.getInts('strides');
         final dilations = a.getInts('dilations');
         final pads = a.getInts('pads');
@@ -760,6 +788,28 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             pads.every((v) => v == 1)) {
           continue; // local Winograd is faster and preserves run/runAsync parity
         }
+      }
+      if (node.opType == 'ConvTranspose') {
+        if (!poolConv) continue;
+        final w = node.input.length > 1 ? _initializers[node.input[1]] : null;
+        final a = _attrsFor(node);
+        if (w == null ||
+            !w.isFloat ||
+            w.rank != 4 ||
+            (a.getInt('group') ?? 1) != 1 ||
+            a.getInts('output_shape') != null) {
+          continue;
+        }
+        final biasT = node.input.length > 2 && node.input[2].isNotEmpty
+            ? _initializers[node.input[2]]
+            : null;
+        if (node.input.length > 2 &&
+            node.input[2].isNotEmpty &&
+            biasT == null) {
+          continue; // runtime bias — keep local
+        }
+        convToReplicate[node.input[1]] = (w.f!, w.shape, biasT?.f);
+        continue;
       }
       if (node.opType == 'MatMul' && node.input.length >= 2) {
         final name = node.input[1];
@@ -845,6 +895,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 pool.convWeights.contains(node.input[1])
             ? ins[0]
             : null;
+        final ctX = pool != null &&
+                node.opType == 'ConvTranspose' &&
+                pool.convWeights.contains(node.input[1])
+            ? ins[0]
+            : null;
         if (node.opType == 'Gather' && _deferredTables.containsKey(node.input[0])) {
           outs = [await _deferredTables[node.input[0]]!.gatherAsync(ins[1]!)];
         } else if (part != null &&
@@ -882,6 +937,58 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
                 y, beta == 1.0 ? c : ops.opMul(c, Tensor.scalarFloat(beta)));
           }
           outs = [y];
+        } else if (pool != null &&
+            node.opType == 'MatMul' &&
+            part == null &&
+            ins.length >= 2 &&
+            ins[0] != null &&
+            ins[1] != null &&
+            ins[0]!.isFloat &&
+            ins[1]!.isFloat &&
+            ins[0]!.rank >= 2 &&
+            ins[1]!.rank == 2 &&
+            ins[0]!.shape[ins[0]!.rank - 1] == ins[1]!.shape[0] &&
+            ins[1]!.length <= (1 << 20) &&
+            ins[0]!.length ~/ ins[1]!.shape[0] >= 512) {
+          // Runtime (non-initializer) B: e.g. FFC twiddle matrices. Split A
+          // rows instead of B columns — the weight is tiny but the activation
+          // is the full spatial tensor.
+          final aM = ins[0]!;
+          final bM = ins[1]!;
+          final m = aM.length ~/ bM.shape[0];
+          final raw =
+              await pool.matmulRuntime(aM.f!, m, bM.f!, bM.shape[0], bM.shape[1]);
+          outs = [
+            Tensor.float(raw,
+                [...aM.shape.sublist(0, aM.rank - 1), bM.shape[1]])
+          ];
+        } else if (pool != null &&
+            node.opType == 'MatMul' &&
+            part == null &&
+            ins.length >= 2 &&
+            ins[0] != null &&
+            ins[1] != null &&
+            ins[0]!.isFloat &&
+            ins[1]!.isFloat &&
+            ins[0]!.rank == 2 &&
+            ins[1]!.rank >= 3 &&
+            ins[0]!.shape[1] == ins[1]!.shape[ins[1]!.rank - 2] &&
+            ins[1]!.length >= (1 << 10) &&
+            ins[1]!.length ~/
+                    (ins[1]!.shape[ins[1]!.rank - 2] * ins[1]!.shape.last) >=
+                2 * pool.workerCount) {
+          // Batched runtime B (FFC twiddles): split B's leading batch dim.
+          final aM = ins[0]!;
+          final bM = ins[1]!;
+          final k = aM.shape[1];
+          final n = bM.shape.last;
+          final batch = bM.length ~/ (k * n);
+          final raw = await pool.matmulBatched(aM.f!, aM.shape[0], k, bM.f!,
+              batch, n);
+          outs = [
+            Tensor.float(raw,
+                [...bM.shape.sublist(0, bM.rank - 2), aM.shape[0], n])
+          ];
         } else if (convX != null &&
             convX.isFloat &&
             (convX.rank == 4 || convX.rank == 3)) {
@@ -912,6 +1019,7 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
               dilations: dilations,
               group: attrsC.getInt('group') ?? 1,
               autoPad: autoPad,
+              kernelH: w.shape[2],
               n: x4.shape[0],
               m: w.shape[0],
               oh: outSp[0],
@@ -920,6 +1028,47 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             final y = Tensor.float(out, [x4.shape[0], w.shape[0], ...outSp]);
             outs = [
               oneD ? y.reshape([y.shape[0], y.shape[1], y.shape[2]]) : y
+            ];
+          }
+        } else if (ctX != null &&
+            ctX.isFloat &&
+            ctX.rank == 4 &&
+            ctX.shape[0] == 1) {
+          final w = _initializers[node.input[1]]!;
+          final strides = attrs.getInts('strides');
+          final pads = attrs.getInts('pads');
+          final dil = attrs.getInts('dilations');
+          final op = attrs.getInts('output_padding');
+          final s0 = strides?[0] ?? 1, s1 = strides?[1] ?? 1;
+          final d0 = dil?[0] ?? 1, d1 = dil?[1] ?? 1;
+          final p0 = pads?[0] ?? 0, p1 = pads?[1] ?? 0;
+          final p2 = pads?[2] ?? 0, p3 = pads?[3] ?? 0;
+          final op0 = op?[0] ?? 0, op1 = op?[1] ?? 0;
+          final inH = ctX.shape[2], inW = ctX.shape[3];
+          final outH =
+              (inH - 1) * s0 + d0 * (w.shape[2] - 1) + 1 + op0 - p0 - p2;
+          final outW =
+              (inW - 1) * s1 + d1 * (w.shape[3] - 1) + 1 + op1 - p1 - p3;
+          if (outH < pool!.workerCount * 2) {
+            outs = _dispatch(node, ins, attrs); // too few rows to split
+          } else {
+            final out = await pool.convTranspose(
+              node.input[1],
+              ctX.f!,
+              ctX.shape,
+              strides: strides,
+              pads: pads,
+              dilations: dil,
+              outputPadding: op,
+              group: attrs.getInt('group') ?? 1,
+              kernelH: w.shape[2],
+              n: ctX.shape[0],
+              m: w.shape[1],
+              oh: outH,
+              ow: outW,
+            );
+            outs = [
+              Tensor.float(out, [ctX.shape[0], w.shape[1], outH, outW])
             ];
           }
         } else {
@@ -951,6 +1100,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         profile.microsByOp.update(
             node.opType, (v) => v + sw.elapsedMicroseconds,
             ifAbsent: () => sw.elapsedMicroseconds);
+        profile.nodes.add(NodeProfile(
+            node.name,
+            node.opType,
+            sw.elapsedMicroseconds,
+            ins.map((t) => t?.shape.toString() ?? '-').join(' ')));
       }
       outs = _roundOutputs(node, outs);
       for (int k = 0; k < node.output.length && k < outs.length; k++) {
@@ -1019,6 +1173,11 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
         profile.microsByOp.update(
             node.opType, (v) => v + sw.elapsedMicroseconds,
             ifAbsent: () => sw.elapsedMicroseconds);
+        profile.nodes.add(NodeProfile(
+            node.name,
+            node.opType,
+            sw.elapsedMicroseconds,
+            ins.map((t) => t?.shape.toString() ?? '-').join(' ')));
       }
       outs = _roundOutputs(node, outs);
       for (int k = 0; k < node.output.length && k < outs.length; k++) {
@@ -1200,6 +1359,10 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
     final out = nn.convOutputSpatial(x.shape.sublist(2), w.shape.sublist(2),
         strides, pads, dilations, autoPad);
     final needed = cPerGroup * kh * kw * out[0] * out[1];
+    // A full im2col buffer is C·kh·kw·oh·ow floats — 14 GB for the 1024²
+    // 384→128 3×3 convs. Cap the persistent workspace and let opConv chunk
+    // above it; winograd tiles internally and needs no im2col at all.
+    if (needed > (8 << 20)) return null;
     final existing = _convWorkspaces[node];
     if (existing != null && existing.length >= needed) return existing;
     return _convWorkspaces[node] = Float32List(needed);
@@ -1730,7 +1893,8 @@ List<Tensor> _roundOutputs(NodeProto node, List<Tensor> outputs) => [
             dilations: convDilations,
             group: attrs.getInt('group') ?? 1,
             autoPad: attrs.getString('auto_pad') ?? 'NOTSET',
-            workspace: _convWorkspace(node, need(0), need(1), attrs),
+            workspace:
+                useWinograd ? null : _convWorkspace(node, need(0), need(1), attrs),
             winogradPlan: useWinograd
                 ? _winogradPlans.putIfAbsent(
                     node,

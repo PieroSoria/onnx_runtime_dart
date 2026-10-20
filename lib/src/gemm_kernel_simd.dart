@@ -26,7 +26,10 @@ const int _panelBytes = 192 * 1024;
 /// offsets). `out` is assumed zero-initialized (fresh allocation).
 void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
     Float32List out, int outOff, int m, int k, int n,
-    {bool narrowDirect = false}) {
+    {bool narrowDirect = false, int? outStride, int panelBytes = _panelBytes}) {
+  // `outStride` lets a caller write a column slab into a wider row layout
+  // (banded convolution: output rows are `oh*ow` apart, the slab is `n` wide).
+  final oStride = outStride ?? n;
   // Single-row GEMV (LLM decode: batch·seq == 1). The register-tiled path
   // below packs a column panel of B before computing — worthwhile when many
   // A-rows reuse it, but for one row that packing is pure overhead (B is read
@@ -36,8 +39,18 @@ void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
     _gemv(a, aOff, b, bOff, out, outOff, k, n);
     return;
   }
+  // Very few output rows (e.g. the 3-channel RGB output conv of a CNN): the
+  // panel-packing path below pays O(k·n) packing for O(m·k·n) work, and its
+  // remainder loop handles fewer than four rows one at a time. Stream B once
+  // into per-column accumulators instead; the k-order is unchanged, so the
+  // result is bitwise identical.
+  if (m < 4) {
+    _matmulSmallM(a, aOff, b, bOff, out, outOff, m, k, n, oStride);
+    return;
+  }
   final bBaseBytes = b.offsetInBytes + bOff * 4;
   if (narrowDirect &&
+      oStride == n &&
       m >= 4 &&
       n <= 32 &&
       (n & 3) == 0 &&
@@ -48,7 +61,7 @@ void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
   // Column-panel width: as many columns as keep k×panel×4 bytes under the
   // target, rounded up to a multiple of 4 (one Float32x4 lane); never wider
   // than n and at least 4.
-  int panel = _panelBytes ~/ (k * 4);
+  int panel = panelBytes ~/ (k * 4);
   panel = (panel >> 2) << 2;
   if (panel < 4) panel = 4;
   if (panel > n) panel = n;
@@ -86,7 +99,8 @@ void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
     int i = 0;
     for (; i + 4 <= m; i += 4) {
       final a0 = aOff + i * k, a1 = a0 + k, a2 = a1 + k, a3 = a2 + k;
-      final o0 = outOff + i * n + p0, o1 = o0 + n, o2 = o1 + n, o3 = o2 + n;
+      final o0 = outOff + i * oStride + p0, o1 = o0 + oStride,
+          o2 = o1 + oStride, o3 = o2 + oStride;
 
       int j = 0;
       // Full 4×8 tiles (two lanes entirely inside the panel width).
@@ -149,7 +163,7 @@ void matmulKernel(Float32List a, int aOff, Float32List b, int bOff,
     // Remainder rows (m % 4): single-row, two lanes at a time.
     for (; i < m; i++) {
       final aRow = aOff + i * k;
-      final oRow = outOff + i * n + p0;
+      final oRow = outOff + i * oStride + p0;
       int j = 0;
       for (; (j + 2) * 4 <= pw; j += 2) {
         var c0 = Float32x4.zero(), c1 = Float32x4.zero();
@@ -362,6 +376,57 @@ void _gemvScalar(Float32List a, int aOff, Float32List b, int bOff,
       br += n;
     }
     out[outOff + j] = acc;
+  }
+}
+
+/// Streaming kernel for `m < 4`: reads B once and keeps one SIMD accumulator
+/// per four output columns, instead of packing a column panel and then walking
+/// it one row at a time. The k accumulation order is the same as the tiled
+/// path, so results are bitwise identical.
+void _matmulSmallM(Float32List a, int aOff, Float32List b, int bOff,
+    Float32List out, int outOff, int m, int k, int n, int oStride) {
+  final n4 = n >> 2;
+  final acc = Float32x4List(m * n4);
+  final va = List<Float32x4>.filled(m, Float32x4.zero());
+  for (int kk = 0; kk < k; kk++) {
+    final aRow = aOff + kk;
+    for (int r = 0; r < m; r++) {
+      va[r] = Float32x4.splat(a[aRow + r * k]);
+    }
+    final bRow = bOff + kk * n;
+    for (int jb = 0; jb < n4; jb++) {
+      final col = jb << 2;
+      final bv = Float32x4(b[bRow + col], b[bRow + col + 1],
+          b[bRow + col + 2], b[bRow + col + 3]);
+      for (int r = 0; r < m; r++) {
+        final i = r * n4 + jb;
+        acc[i] += va[r] * bv;
+      }
+    }
+  }
+  final lane = Float32x4List(1);
+  final laneF = lane.buffer.asFloat32List();
+  for (int r = 0; r < m; r++) {
+    final oRow = outOff + r * oStride;
+    final aRow = aOff + r * k;
+    final base = r * n4;
+    for (int jb = 0; jb < n4; jb++) {
+      lane[0] = acc[base + jb];
+      final col = jb << 2;
+      out[oRow + col] = laneF[0];
+      out[oRow + col + 1] = laneF[1];
+      out[oRow + col + 2] = laneF[2];
+      out[oRow + col + 3] = laneF[3];
+    }
+    for (int col = n4 << 2; col < n; col++) {
+      double s = 0;
+      int br = bOff + col;
+      for (int kk = 0; kk < k; kk++) {
+        s += a[aRow + kk] * b[br];
+        br += n;
+      }
+      out[oRow + col] = s;
+    }
   }
 }
 

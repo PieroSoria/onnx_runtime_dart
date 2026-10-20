@@ -14,6 +14,17 @@ import 'gemm_kernel_scalar.dart' if (dart.library.ffi) 'gemm_kernel_simd.dart'
     as gemm;
 import 'tensor.dart';
 
+/// B-panel footprint for convolution GEMMs. Conv im2col has a much larger `k`
+/// than transformer matmuls (C·kh·kw), so the default 192 KiB panel would be
+/// only a few columns wide and re-read the weight matrix hundreds of times per
+/// call. 2 MiB keeps the panel in L2/L3 while cutting those re-reads ~10x.
+const int _convPanelBytes = 2 << 20;
+
+/// Reusable im2col buffer for calls without an explicit workspace (the isolate
+/// workers). Without it each conv allocates and drops a multi-MB panel, which
+/// keeps the GC busy on 1024² models. Each isolate has its own copy.
+Float32List _convScratch = Float32List(0);
+
 // ---------------------------------------------------------------------------
 // Shared spatial-window helpers
 // ---------------------------------------------------------------------------
@@ -94,6 +105,60 @@ List<int> convOutputSpatial(List<int> inSp, List<int> kernel,
   return outSp;
 }
 
+/// Global input-row range `[start, end)` a 2-D Conv output-row band
+/// `[bandStart, bandEnd)` reads. The isolate pool uses this to ship only the
+/// rows (plus kernel halo) each worker needs instead of the whole activation.
+(int, int) convInputRowRange({
+  required int inH,
+  required int kernelH,
+  required int bandStart,
+  required int bandEnd,
+  int stride = 1,
+  int dilation = 1,
+  int? padTop,
+  String autoPad = 'NOTSET',
+}) {
+  final (p, _) = _resolvePads(
+    inDims: [inH],
+    kernel: [kernelH],
+    strides: [stride],
+    dilations: [dilation],
+    autoPad: autoPad,
+    pads: padTop == null ? null : [padTop, padTop],
+  );
+  final top = p[0];
+  var start = bandStart * stride - top;
+  var end = (bandEnd - 1) * stride + (kernelH - 1) * dilation - top + 1;
+  if (start < 0) start = 0;
+  if (end > inH) end = inH;
+  if (end < start) end = start;
+  return (start, end);
+}
+
+/// Input rows that can contribute to output rows [bandStart, bandEnd) of a
+/// transposed convolution with the given stride/dilation/top pad. Includes
+/// the kernel halo, so adjacent bands overlap by up to `ceil(kernel/stride)`.
+(int, int) convTransposeInputRowRange({
+  required int inH,
+  required int kernelH,
+  required int bandStart,
+  required int bandEnd,
+  int stride = 1,
+  int dilation = 1,
+  int padTop = 0,
+}) {
+  if (inH <= 0) return (0, 0);
+  // ceil((bandStart + padTop - (kernelH - 1)·dilation) / stride)
+  final rawStart =
+      bandStart + padTop - (kernelH - 1) * dilation;
+  var start = -((-rawStart) ~/ stride);
+  var end = (bandEnd - 1 + padTop) ~/ stride;
+  if (start < 0) start = 0;
+  if (end > inH - 1) end = inH - 1;
+  if (end < start) return (start, start);
+  return (start, end + 1);
+}
+
 // ---------------------------------------------------------------------------
 // Conv
 // ---------------------------------------------------------------------------
@@ -114,6 +179,8 @@ Tensor opConv(
   int? bandEnd,
   Float32List? workspace,
   WinogradF2x2Plan? winogradPlan,
+  int? srcRowStart,
+  int? srcRows,
 }) {
   final nd = x.rank - 2;
   assert(
@@ -165,6 +232,11 @@ Tensor opConv(
 
   if (nd == 2) {
     final h = inSp[0], wd = inSp[1];
+    // The pool may hand a worker only the input rows its output band reads;
+    // `srcRowStart` is the slice's first global row and `srcRows` the full
+    // input height. Standalone calls have srcRowStart == 0, srcRows == h.
+    final srcStart = srcRowStart ?? 0;
+    final globalInH = srcRows ?? h;
     final kh = kernel[0], kw = kernel[1];
     final oh = (bandEnd ?? outSp[0]) - b0, ow = outSp[1];
     final sh = s[0], sw = s[1], dh = d[0], dw = d[1], ph = p[0], pw = p[1];
@@ -172,6 +244,8 @@ Tensor opConv(
     // Depthwise (1 in / 1 out channel per group): im2col+GEMM degenerates to
     // m=1 matmuls where packing dominates — the direct loop wins.
     final depthwise = cPerGroup == 1 && mPerGroup == 1;
+    assert(!(depthwise && srcRowStart != null),
+        'depthwise conv does not support row-sliced input');
 
     if (winogradPlan != null &&
         group == 1 &&
@@ -208,56 +282,86 @@ Tensor opConv(
           bandEnd == null;
       final colRows = cPerGroup * kh * kw;
       final colN = oh * ow;
-      final workspaceSize = colRows * colN;
+      // Chunk the im2col panel over output rows so the whole
+      // [colRows × oh*ow] matrix is never materialized (it reaches several GB
+      // for 1024² feature maps). Each output row is independent, so the
+      // chunked result is bitwise identical to the full-panel result.
+      const defaultChunkFloats = 8 << 20; // 32 MiB
+      final availableFloats = workspace?.length ?? defaultChunkFloats;
+      var chunkRows = availableFloats ~/ (colRows * ow);
+      if (chunkRows < 1) chunkRows = 1;
+      if (chunkRows > oh) chunkRows = oh;
+      final chunkFloats = colRows * chunkRows * ow;
       final cols = pointwise
           ? null
-          : workspace != null && workspace.length >= workspaceSize
+          : workspace != null && workspace.length >= chunkFloats
               ? workspace
-              : Float32List(workspaceSize);
+              : _convScratch.length >= chunkFloats
+                  ? _convScratch
+                  : (_convScratch = Float32List(chunkFloats));
+      // With no padding every im2col slot is overwritten below, so the
+      // zero-fill pass is redundant (and costs a full extra sweep over a
+      // 32 MiB panel per chunk).
+      final noPad = ph == 0 && pw == 0 && p[2] == 0 && p[3] == 0;
       for (int b = 0; b < n; b++) {
         for (int g = 0; g < group; g++) {
           final xGroupBase = (b * cIn + g * cPerGroup) * h * wd;
-          if (cols != null) {
-            // im2col: row r=(c,ky,kx) holds x values for every output pos.
-            cols.fillRange(0, cols.length, 0);
-            for (int c = 0; c < cPerGroup; c++) {
-              final xBase = xGroupBase + c * h * wd;
-              for (int ky = 0; ky < kh; ky++) {
-                for (int kx = 0; kx < kw; kx++) {
-                  final row = ((c * kh + ky) * kw + kx) * colN;
-                  for (int oy = 0; oy < oh; oy++) {
-                    final iy = (oy + b0) * sh - ph + ky * dh;
-                    if (iy < 0 || iy >= h) continue;
-                    final xRow = xBase + iy * wd;
-                    final colRow = row + oy * ow;
-                    // Tight ox range with ix = ox*sw - pw + kx*dw in [0, wd).
-                    final off = kx * dw - pw;
-                    int ox0 = off < 0 ? ((-off + sw - 1) ~/ sw) : 0;
-                    int ox1 = ow;
-                    while (ox1 > ox0 && (ox1 - 1) * sw + off >= wd) {
-                      ox1--;
-                    }
-                    for (int ox = ox0; ox < ox1; ox++) {
-                      cols[colRow + ox] = xf[xRow + ox * sw + off];
+          final outOff = (b * m + g * mPerGroup) * colN;
+          for (int row0 = 0; row0 < oh; row0 += chunkRows) {
+            final rows = row0 + chunkRows <= oh ? chunkRows : oh - row0;
+            final chunkN = rows * ow;
+            if (cols != null) {
+              // im2col for this row chunk: row r=(c,ky,kx) holds x values for
+              // every output position of the chunk.
+              if (!noPad) cols.fillRange(0, colRows * chunkN, 0);
+              for (int c = 0; c < cPerGroup; c++) {
+                final xBase = xGroupBase + c * h * wd;
+                for (int ky = 0; ky < kh; ky++) {
+                  for (int kx = 0; kx < kw; kx++) {
+                    final row = ((c * kh + ky) * kw + kx) * chunkN;
+                    for (int oyLocal = 0; oyLocal < rows; oyLocal++) {
+                      final iy =
+                          (b0 + row0 + oyLocal) * sh - ph + ky * dh;
+                      if (iy < 0 || iy >= globalInH) continue;
+                      final ly = iy - srcStart;
+                      if (ly < 0 || ly >= h) continue;
+                      final xRow = xBase + ly * wd;
+                      final colRow = row + oyLocal * ow;
+                      // Tight ox range with ix = ox*sw - pw + kx*dw in [0, wd).
+                      final off = kx * dw - pw;
+                      int ox0 = off < 0 ? ((-off + sw - 1) ~/ sw) : 0;
+                      int ox1 = ow;
+                      while (ox1 > ox0 && (ox1 - 1) * sw + off >= wd) {
+                        ox1--;
+                      }
+                      if (sw == 1) {
+                        cols.setRange(
+                            colRow + ox0, colRow + ox1, xf, xRow + ox0 + off);
+                      } else {
+                        for (int ox = ox0; ox < ox1; ox++) {
+                          cols[colRow + ox] = xf[xRow + ox * sw + off];
+                        }
+                      }
                     }
                   }
                 }
               }
             }
+            // Weight rows are already [mPerGroup × colRows] contiguously.
+            // Pointwise convs read the input rows matching the output band.
+            gemm.matmulKernel(
+                wf,
+                g * mPerGroup * colRows,
+                cols ?? xf,
+                cols == null ? xGroupBase + (b0 + row0) * wd : 0,
+                out,
+                outOff + row0 * ow,
+                mPerGroup,
+                colRows,
+                chunkN,
+                outStride: colN,
+                panelBytes: _convPanelBytes);
           }
-          final outOff = (b * m + g * mPerGroup) * colN;
-          // Weight rows are already [mPerGroup × colRows] contiguously.
-          // Pointwise convs read the input rows matching the output band.
-          gemm.matmulKernel(
-              wf,
-              g * mPerGroup * colRows,
-              cols ?? xf,
-              cols == null ? xGroupBase + b0 * wd : 0,
-              out,
-              outOff,
-              mPerGroup,
-              colRows,
-              colN);
         }
       }
       if (bf != null) {
@@ -446,82 +550,102 @@ WinogradF2x2Plan pretransformWinogradF2x2(Tensor w,
 
 Tensor _convWinogradF2x2(Float32List x, WinogradF2x2Plan plan,
     Float32List? bias, int n, int c, int m, int h, int w) {
-  final th = (h + 1) >> 1, tw = (w + 1) >> 1, tiles = th * tw;
-  final (v, products) = plan.scratch(c, m, tiles);
-  final u = plan.weights;
-  final ph = th * 2 + 2, pw = tw * 2 + 2;
-  final padded = plan.paddedInput(c, ph, pw);
-  final tmp = Float64List(16);
+  final th = (h + 1) >> 1, tw = (w + 1) >> 1;
   final out = Float32List(n * m * h * w);
+  // Process tile rows in bands: the 16 transformed input/products planes are
+  // [c × tiles] and [m × tiles], which at 1024² would otherwise need several
+  // GB in flight. Tiles are independent, so banding is bitwise identical.
+  const chunkFloats = 16 << 20; // 64 MiB across v + products
+  var bandRows = chunkFloats ~/ (16 * (c + m) * tw);
+  if (bandRows < 1) bandRows = 1;
+  if (bandRows > th) bandRows = th;
+  final bandTiles = bandRows * tw;
+  final (v, products) = plan.scratch(c, m, bandTiles);
+  final u = plan.weights;
+  final pw = tw * 2 + 2;
+  final tmp = Float64List(16);
   for (int b = 0; b < n; b++) {
-    for (int ic = 0; ic < c; ic++) {
-      final source = (b * c + ic) * h * w;
-      final target = ic * ph * pw + pw + 1;
-      for (int y = 0; y < h; y++) {
-        padded.setRange(
-            target + y * pw, target + y * pw + w, x, source + y * w);
+    for (int ty0 = 0; ty0 < th; ty0 += bandRows) {
+      final tyEnd = ty0 + bandRows <= th ? ty0 + bandRows : th;
+      final rows = tyEnd - ty0;
+      final padRows = rows * 2 + 2;
+      final padded = plan.paddedInput(c, padRows, pw);
+      // Copy only the input rows this tile band reads (1-row halo on each
+      // side). Padded row 0 is the top pad, so input row y lands on y + 1.
+      final pRow0 = ty0 * 2;
+      final yStart = pRow0 - 1;
+      final yEnd = pRow0 + padRows - 1;
+      for (int ic = 0; ic < c; ic++) {
+        final source = (b * c + ic) * h * w;
+        final dstBase = ic * padRows * pw;
+        for (int y = yStart; y < yEnd; y++) {
+          if (y < 0 || y >= h) continue;
+          final dst = dstBase + (y + 1 - pRow0) * pw + 1;
+          padded.setRange(dst, dst + w, x, source + y * w);
+        }
       }
-    }
-    for (final q in v) {
-      q.fillRange(0, q.length, 0);
-    }
-    for (int ic = 0; ic < c; ic++) {
-      final xb = ic * ph * pw;
-      for (int ty = 0; ty < th; ty++) {
-        for (int tx = 0; tx < tw; tx++) {
-          for (int r = 0; r < 4; r++) {
-            final o = r * 4;
-            final source = xb + (ty * 2 + r) * pw + tx * 2;
-            final d0 = padded[source], d1 = padded[source + 1];
-            final d2 = padded[source + 2], d3 = padded[source + 3];
-            tmp[o] = d0 - d2;
-            tmp[o + 1] = d1 + d2;
-            tmp[o + 2] = -d1 + d2;
-            tmp[o + 3] = d1 - d3;
-          }
-          final tile = ty * tw + tx;
-          for (int col = 0; col < 4; col++) {
-            final a0 = tmp[col], a1 = tmp[4 + col];
-            final a2 = tmp[8 + col], a3 = tmp[12 + col];
-            v[col][ic * tiles + tile] = a0 - a2;
-            v[4 + col][ic * tiles + tile] = a1 + a2;
-            v[8 + col][ic * tiles + tile] = -a1 + a2;
-            v[12 + col][ic * tiles + tile] = a1 - a3;
+      for (final q in v) {
+        q.fillRange(0, c * bandTiles, 0);
+      }
+      for (int ic = 0; ic < c; ic++) {
+        final xb = ic * padRows * pw;
+        for (int ty = 0; ty < rows; ty++) {
+          for (int tx = 0; tx < tw; tx++) {
+            for (int r = 0; r < 4; r++) {
+              final o = r * 4;
+              final source = xb + (ty * 2 + r) * pw + tx * 2;
+              final d0 = padded[source], d1 = padded[source + 1];
+              final d2 = padded[source + 2], d3 = padded[source + 3];
+              tmp[o] = d0 - d2;
+              tmp[o + 1] = d1 + d2;
+              tmp[o + 2] = -d1 + d2;
+              tmp[o + 3] = d1 - d3;
+            }
+            final tile = ty * tw + tx;
+            for (int col = 0; col < 4; col++) {
+              final a0 = tmp[col], a1 = tmp[4 + col];
+              final a2 = tmp[8 + col], a3 = tmp[12 + col];
+              v[col][ic * bandTiles + tile] = a0 - a2;
+              v[4 + col][ic * bandTiles + tile] = a1 + a2;
+              v[8 + col][ic * bandTiles + tile] = -a1 + a2;
+              v[12 + col][ic * bandTiles + tile] = a1 - a3;
+            }
           }
         }
       }
-    }
-    for (int q = 0; q < 16; q++) {
-      products[q].fillRange(0, products[q].length, 0);
-      gemm.matmulKernel(u[q], 0, v[q], 0, products[q], 0, m, c, tiles,
-          narrowDirect: plan.narrowDirectGemm);
-    }
-    for (int om = 0; om < m; om++) {
-      final ob = (b * m + om) * h * w;
-      for (int ty = 0; ty < th; ty++) {
-        for (int tx = 0; tx < tw; tx++) {
-          final tile = ty * tw + tx;
-          for (int col = 0; col < 4; col++) {
-            final a0 = products[col][om * tiles + tile];
-            final a1 = products[4 + col][om * tiles + tile];
-            final a2 = products[8 + col][om * tiles + tile];
-            final a3 = products[12 + col][om * tiles + tile];
-            tmp[col] = a0 + a1 + a2;
-            tmp[4 + col] = a1 - a2 - a3;
-          }
-          final oy = ty * 2, ox = tx * 2;
-          final b0 = bias == null ? 0.0 : bias[om];
-          if (oy < h && ox < w) {
-            out[ob + oy * w + ox] = tmp[0] + tmp[1] + tmp[2] + b0;
-          }
-          if (oy < h && ox + 1 < w) {
-            out[ob + oy * w + ox + 1] = tmp[1] - tmp[2] - tmp[3] + b0;
-          }
-          if (oy + 1 < h && ox < w) {
-            out[ob + (oy + 1) * w + ox] = tmp[4] + tmp[5] + tmp[6] + b0;
-          }
-          if (oy + 1 < h && ox + 1 < w) {
-            out[ob + (oy + 1) * w + ox + 1] = tmp[5] - tmp[6] - tmp[7] + b0;
+      for (int q = 0; q < 16; q++) {
+        products[q].fillRange(0, m * bandTiles, 0);
+        gemm.matmulKernel(u[q], 0, v[q], 0, products[q], 0, m, c, bandTiles,
+            narrowDirect: plan.narrowDirectGemm,
+            panelBytes: _convPanelBytes);
+      }
+      for (int om = 0; om < m; om++) {
+        final ob = (b * m + om) * h * w;
+        for (int ty = 0; ty < rows; ty++) {
+          for (int tx = 0; tx < tw; tx++) {
+            final tile = ty * tw + tx;
+            for (int col = 0; col < 4; col++) {
+              final a0 = products[col][om * bandTiles + tile];
+              final a1 = products[4 + col][om * bandTiles + tile];
+              final a2 = products[8 + col][om * bandTiles + tile];
+              final a3 = products[12 + col][om * bandTiles + tile];
+              tmp[col] = a0 + a1 + a2;
+              tmp[4 + col] = a1 - a2 - a3;
+            }
+            final oy = (ty0 + ty) * 2, ox = tx * 2;
+            final b0 = bias == null ? 0.0 : bias[om];
+            if (oy < h && ox < w) {
+              out[ob + oy * w + ox] = tmp[0] + tmp[1] + tmp[2] + b0;
+            }
+            if (oy < h && ox + 1 < w) {
+              out[ob + oy * w + ox + 1] = tmp[1] - tmp[2] - tmp[3] + b0;
+            }
+            if (oy + 1 < h && ox < w) {
+              out[ob + (oy + 1) * w + ox] = tmp[4] + tmp[5] + tmp[6] + b0;
+            }
+            if (oy + 1 < h && ox + 1 < w) {
+              out[ob + (oy + 1) * w + ox + 1] = tmp[5] - tmp[6] - tmp[7] + b0;
+            }
           }
         }
       }
@@ -543,6 +667,13 @@ Tensor opConvTranspose(
   List<int>? outputPadding,
   List<int>? outputShape,
   int group = 1,
+  // Banded execution (isolate pool): compute only output rows
+  // [bandStart, bandEnd) from the input slice starting at global row
+  // `srcRowStart`; `srcRows` is the full input height.
+  int? bandStart,
+  int? bandEnd,
+  int? srcRowStart,
+  int? srcRows,
 }) {
   final nd = x.rank - 2;
   final n = x.shape[0], cIn = x.shape[1];
@@ -610,12 +741,18 @@ Tensor opConvTranspose(
   // O(C·H·W·kH·kW·M) with cache-hostile scatter — seconds per call on the
   // Demucs / VAE decoders; this makes the heavy work a SIMD GEMM.
   if (nd == 2 && outputShape == null && n == 1) {
-    final hIn = inSp[0], wIn = inSp[1], kH = kernel[0], kW = kernel[1];
-    final outH = (hIn - 1) * s[0] + d[0] * (kH - 1) + 1 + op[0] - p[0] - p[2];
+    final sliceH = inSp[0], wIn = inSp[1], kH = kernel[0], kW = kernel[1];
+    final globalH = srcRows ?? sliceH;
+    final fullH =
+        (globalH - 1) * s[0] + d[0] * (kH - 1) + 1 + op[0] - p[0] - p[2];
     final outW = (wIn - 1) * s[1] + d[1] * (kW - 1) + 1 + op[1] - p[1] - p[3];
+    final b0 = bandStart ?? 0;
+    final b1 = bandEnd ?? fullH;
+    final bandRows = b1 - b0;
+    final srcStart = srcRowStart ?? 0;
     final xf = x.asFloatList(), wf = w.asFloatList();
-    final out = Float32List(m * outH * outW);
-    final hw = hIn * wIn, mkk = mPerGroup * kH * kW;
+    final out = Float32List(m * bandRows * outW);
+    final hw = sliceH * wIn, mkk = mPerGroup * kH * kW;
     final wT = Float32List(mkk * cPerGroup);
     final prod = Float32List(mkk * hw);
     for (int g = 0; g < group; g++) {
@@ -631,16 +768,16 @@ Tensor opConvTranspose(
           wT, 0, xf, g * cPerGroup * hw, prod, 0, mkk, cPerGroup, hw);
       // col2im: overlap-add each (mm, kh, kw) plane into the output.
       for (int mm = 0; mm < mPerGroup; mm++) {
-        final oBase = (g * mPerGroup + mm) * outH * outW;
+        final oBase = (g * mPerGroup + mm) * bandRows * outW;
         for (int kh = 0; kh < kH; kh++) {
-          final ohShift = kh * d[0] - p[0];
+          final ohShift = kh * d[0] - p[0] - b0;
           for (int kw = 0; kw < kW; kw++) {
             final owShift = kw * d[1] - p[1];
             final pBase = ((mm * kH + kh) * kW + kw) * hw;
-            for (int ih = 0; ih < hIn; ih++) {
-              final oh = ih * s[0] + ohShift;
-              if (oh < 0 || oh >= outH) continue;
-              final pRow = pBase + ih * wIn, oRow = oBase + oh * outW;
+            for (int ihLocal = 0; ihLocal < sliceH; ihLocal++) {
+              final oh = (srcStart + ihLocal) * s[0] + ohShift;
+              if (oh < 0 || oh >= bandRows) continue;
+              final pRow = pBase + ihLocal * wIn, oRow = oBase + oh * outW;
               for (int iw = 0; iw < wIn; iw++) {
                 final ow = iw * s[1] + owShift;
                 if (ow >= 0 && ow < outW) out[oRow + ow] += prod[pRow + iw];
@@ -652,7 +789,7 @@ Tensor opConvTranspose(
     }
     if (bias != null) {
       final bff = bias.asFloatList();
-      final plane = outH * outW;
+      final plane = bandRows * outW;
       for (int mm = 0; mm < m; mm++) {
         final base = mm * plane, bv = bff[mm];
         for (int t = 0; t < plane; t++) {
@@ -660,7 +797,7 @@ Tensor opConvTranspose(
         }
       }
     }
-    return Tensor.float(out, [1, m, outH, outW]);
+    return Tensor.float(out, [1, m, bandRows, outW]);
   }
 
   final outSp = List<int>.filled(nd, 0);

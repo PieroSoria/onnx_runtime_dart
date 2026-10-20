@@ -2672,40 +2672,76 @@ Tensor opPad(
   ];
   final n = outShape.fold<int>(1, (a, b) => a * b);
   final srcStrides = x.strides;
-  final coords = List<int>.filled(rank, 0);
   final isFloat = x.isFloat;
   final outF = isFloat ? Float32List(n) : null;
   final outI = isFloat ? null : Int64List(n);
 
-  for (int idx = 0; idx < n; idx++) {
-    int srcOff = 0;
-    bool inside = true;
-    for (int a = 0; a < rank; a++) {
-      int i = coords[a] - beg[a];
-      final dim = x.shape[a];
-      if (i < 0 || i >= dim) {
-        switch (mode) {
-          case 'reflect':
-            // Mirror without repeating the border sample.
-            while (i < 0 || i >= dim) {
-              if (i < 0) i = -i;
-              if (i >= dim) i = 2 * dim - 2 - i;
-            }
-          case 'edge':
-            i = i < 0 ? 0 : dim - 1;
-          default: // constant
-            inside = false;
+  // Row-wise copy: map each output coordinate back to a source coordinate
+  // once per axis, then move whole contiguous runs with setRange. The generic
+  // per-element odometer below is O(n·rank) and dominated multi-hundred-ms
+  // reflect paddings on 1024² activations.
+  final maps = [
+    for (int a = 0; a < rank; a++)
+      _padIndexMap(x.shape[a], beg[a], end[a], mode)
+  ];
+  final last = rank - 1;
+  final inner = x.shape[last];
+  final outInner = outShape[last];
+  final outerCount = outInner == 0 ? 0 : n ~/ outInner;
+  final coords = List<int>.filled(rank - 1, 0);
+  final lastMap = maps[last];
+  final srcF = isFloat ? x.f! : null;
+  final srcI = isFloat ? null : x.intData;
+  final cv = constantValue.toInt();
+  final hasBorder = beg[last] != 0 || end[last] != 0;
+  for (int o = 0; o < outerCount; o++) {
+    int srcRow = 0;
+    bool valid = true;
+    for (int a = 0; a < last; a++) {
+      final i = maps[a][coords[a]];
+      if (i < 0) {
+        valid = false;
+        break;
+      }
+      srcRow += i * srcStrides[a];
+    }
+    final dst = o * outInner;
+    if (isFloat) {
+      final out = outF!;
+      if (!valid) {
+        out.fillRange(dst, dst + outInner, constantValue);
+      } else if (!hasBorder) {
+        out.setRange(dst, dst + outInner, srcF!, srcRow);
+      } else {
+        out.setRange(dst + beg[last], dst + beg[last] + inner, srcF!, srcRow);
+        for (int j = 0; j < beg[last]; j++) {
+          final i = lastMap[j];
+          out[dst + j] = i < 0 ? constantValue : srcF[srcRow + i];
+        }
+        for (int j = beg[last] + inner; j < outInner; j++) {
+          final i = lastMap[j];
+          out[dst + j] = i < 0 ? constantValue : srcF[srcRow + i];
         }
       }
-      if (!inside) break;
-      srcOff += i * srcStrides[a];
-    }
-    if (isFloat) {
-      outF![idx] = inside ? x.f![srcOff] : constantValue;
     } else {
-      outI![idx] = inside ? x.intData[srcOff] : constantValue.toInt();
+      final out = outI!;
+      if (!valid) {
+        out.fillRange(dst, dst + outInner, cv);
+      } else if (!hasBorder) {
+        out.setRange(dst, dst + outInner, srcI!, srcRow);
+      } else {
+        out.setRange(dst + beg[last], dst + beg[last] + inner, srcI!, srcRow);
+        for (int j = 0; j < beg[last]; j++) {
+          final i = lastMap[j];
+          out[dst + j] = i < 0 ? cv : srcI[srcRow + i];
+        }
+        for (int j = beg[last] + inner; j < outInner; j++) {
+          final i = lastMap[j];
+          out[dst + j] = i < 0 ? cv : srcI[srcRow + i];
+        }
+      }
     }
-    for (int a = rank - 1; a >= 0; a--) {
+    for (int a = last - 1; a >= 0; a--) {
       if (++coords[a] < outShape[a]) break;
       coords[a] = 0;
     }
@@ -2713,6 +2749,36 @@ Tensor opPad(
   return isFloat
       ? Tensor.float(outF!, outShape)
       : Tensor.int64(outI!, outShape);
+}
+
+/// Maps every output index along one axis to a source index, or -1 when
+/// `constant` mode leaves it in the pad. Mirrors ONNX reflect/edge semantics.
+List<int> _padIndexMap(int dim, int before, int after, String mode) {
+  final len = dim + before + after;
+  final map = List<int>.filled(len, 0);
+  if (mode == 'reflect' && dim <= 1 && (before > 0 || after > 0)) {
+    // ONNX requires reflect pad < input dim; without this the mirror loop
+    // below never converges for a singleton axis.
+    throw ArgumentError.value(
+        dim, 'dim', 'reflect padding requires an axis longer than 1');
+  }
+  for (int j = 0; j < len; j++) {
+    int i = j - before;
+    switch (mode) {
+      case 'reflect':
+        while (i < 0 || i >= dim) {
+          if (i < 0) i = -i;
+          if (i >= dim) i = 2 * dim - 2 - i;
+        }
+      case 'edge':
+        if (i < 0) i = 0;
+        if (i >= dim) i = dim - 1;
+      default:
+        if (i < 0 || i >= dim) i = -1;
+    }
+    map[j] = i;
+  }
+  return map;
 }
 
 /// `Range(start, limit, delta)` — a 1-D sequence, int64 if the bounds are int.
