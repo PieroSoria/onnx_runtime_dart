@@ -152,3 +152,20 @@ lever is parallelizing large elementwise ops and overlapping their bands with
 conv work.
 
 
+
+## Native ONNX Runtime backend (optional)
+
+LaMa manga inpainting, input `1x3x1024x1024` + `1x1x1024x1024`, deterministic
+synthetic feed, ONNX Runtime 1.30, Windows, machine at ~60% external CPU load.
+
+| Backend | Wall | Peak RSS |
+|---|---:|---:|
+| ONNX Runtime CPU, 8 intra-op threads | 6.4 s | 4.2 GB |
+| ONNX Runtime CUDA (RTX 4070 Ti SUPER) | 0.29 s | 1.3 GB |
+| Pure Dart, single-threaded | 113.9 s | - |
+
+CPU ORT vs pure-Dart parity on the same feed: max abs error 4.9e-5, mean
+7.4e-10, 0/3,145,728 elements outside tolerance. The earlier 4.8 s ORT CPU
+reference was measured on a quieter machine; re-benchmark on the target host.
+See `docs/native_backend.md` and `tool/bench_native.dart`.
+

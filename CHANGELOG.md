@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.0
+
+- **Optional native ONNX Runtime backend.** `OnnxSession` selects the
+  pure-Dart interpreter, native ONNX Runtime, or `auto` (native with Dart
+  fallback). The web/WebAssembly entrypoint remains pure Dart and rejects
+  `OnnxBackend.ort`.
+- Added the backend-neutral `OnnxRunner` interface; `OnnxModel` now implements
+  it. Existing `OnnxModel` APIs and imports are unchanged.
+- Native backend features: CPU and CUDA providers, multi-output sessions,
+  metadata inspection, f32/i64/u8/i8 inputs, output conversion for
+  f16/f64/bf16/i32/bool/u32/u64, graph/execution/thread/memory options,
+  library discovery through `OrtOptions` and environment variables, and
+  Windows CUDA DLL preloading. `OrtRunner.fromFileSync`/`fromBytesSync`
+  support synchronous callers, and `OrtRunner.warnings` exposes non-fatal
+  provider/setup warnings.
+- Added `tool/bench_native.dart`, native smoke tests (enabled with
+  `ORT_LIBRARY`), a Node-based web test, and
+  [native backend documentation](docs/native_backend.md).
+- Requires ONNX Runtime 1.15+ (C API v17); validated against ONNX Runtime 1.30.
+  The package still ships no native binaries.
+
 ## 0.10.8
 
 - Retain four hardware-sensitive execution strategies as explicit, per-model

@@ -1,8 +1,9 @@
 # onnx_runtime_dart
 
-A small, dependency-light **pure-Dart ONNX inference runtime**. No FFI and no
-native `onnxruntime` — the graph is interpreted in plain Dart, so the same code
-runs on **every Dart/Flutter target, including the web and WebAssembly**.
+A small, dependency-light **pure-Dart ONNX inference runtime** with an optional
+native ONNX Runtime backend. The graph is interpreted in plain Dart by default,
+so the same code runs on **every Dart/Flutter target, including the web and
+WebAssembly**; native apps can opt into ONNX Runtime through FFI.
 
 It implements the operator set used by **transformer / attention** models
 (BERT/XLM-R/MPNet/DeBERTa embedders and rerankers, RoPE / ALiBi variants, Qwen3
@@ -207,7 +208,7 @@ memory bounded for large models. Per-node timings are available through
 
 ```yaml
 dependencies:
-  onnx_runtime_dart: ^0.10.4
+  onnx_runtime_dart: ^0.11.0
 ```
 
 ## Usage
@@ -233,6 +234,44 @@ void main() {
 On the web (no `dart:io`), use `OnnxModel.fromBytes(bytes)` directly; for
 external-data models pass an `externalData` resolver.
 
+### Native ONNX Runtime backend
+
+On desktop and mobile, `OnnxSession` can load the same model with ONNX Runtime
+through FFI. `auto` prefers the native backend and falls back to the pure-Dart
+interpreter if the shared library is unavailable; `ort` requires it.
+
+```dart
+import 'package:onnx_runtime_dart/onnx_runtime_dart.dart';
+
+final model = await OnnxSession.fromFile(
+  'model.onnx',
+  backend: OnnxBackend.auto,
+  ort: const OrtOptions(
+    // Optional: otherwise ONNX_RUNTIME_DART_ORT_LIBRARY / ORT_LIBRARY is used.
+    libraryPath: r'C:\app\runtime\onnxruntime.dll',
+    intraOpThreads: 8,
+  ),
+);
+final out = model.run(feed, model.outputNames);
+model.dispose();
+```
+
+The package does not ship ONNX Runtime binaries. Bundle the matching
+`onnxruntime.dll` / `libonnxruntime.so` / `libonnxruntime.dylib` with the app,
+or point at an installed copy. CPU is the default provider; CUDA is available on
+Windows/Linux builds that include it:
+
+```dart
+const options = OrtOptions(
+  providers: [OrtCudaProvider(useTf32: false)],
+);
+```
+
+The FFI call is synchronous; run it in a worker isolate for UI work. The web
+build never imports `dart:ffi` and rejects `OnnxBackend.ort`. See
+[Native backend](docs/native_backend.md) for library discovery, CUDA preload,
+providers, error handling and benchmarks.
+
 ### Hardware A/B experiments
 
 Strategies that improved some machines but regressed others are retained as
@@ -250,8 +289,8 @@ final model = loadOnnxModel('model.onnx', experiments: {
 They are composable so benchmark them individually and together. The benchmark
 tool accepts the same enum names, for example
 `dart run tool/bench.dart model.onnx --iters 100 --experiments narrowDirectGemm`.
-These pure-Dart paths execute on the CPU; a GPU comparison requires a native or
-web runtime with an actual GPU execution provider.
+These pure-Dart paths execute on the CPU; for GPU execution use the optional
+native backend with `OrtCudaProvider` (see [Native backend](docs/native_backend.md)).
 
 Weights load from float32, float16, float64, int32, int64, bool, and int8 /
 uint8 (kept in compact 1-byte storage) tensors, plus 4-bit block-quantized
