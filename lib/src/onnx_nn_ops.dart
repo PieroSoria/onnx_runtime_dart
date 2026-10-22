@@ -1180,6 +1180,73 @@ Tensor opAveragePool(
   countIncludePad: countIncludePad,
 );
 
+Tensor opLpPool(
+  Tensor x, {
+  required List<int> kernel,
+  int p = 2,
+  List<int>? strides,
+  List<int>? pads,
+  List<int>? dilations,
+  String autoPad = 'NOTSET',
+  bool ceilMode = false,
+}) {
+  final nd = x.rank - 2;
+  final n = x.shape[0], c = x.shape[1];
+  final inSp = x.shape.sublist(2);
+  final s = strides ?? List.filled(nd, 1);
+  final d = dilations ?? List.filled(nd, 1);
+  final (pad, outSp) = _resolvePads(
+    inDims: inSp,
+    kernel: kernel,
+    strides: s,
+    dilations: d,
+    autoPad: autoPad,
+    pads: pads,
+    ceilMode: ceilMode,
+  );
+  final xf = x.asFloatList();
+  final outSpN = _prod(outSp), inSpN = _prod(inSp), kN = _prod(kernel);
+  final out = Float32List(n * c * outSpN);
+  final inStrides = List<int>.filled(nd, 1);
+  for (int k = nd - 2; k >= 0; k--) {
+    inStrides[k] = inStrides[k + 1] * inSp[k + 1];
+  }
+  final oCoord = List<int>.filled(nd, 0);
+  final kCoord = List<int>.filled(nd, 0);
+  for (int img = 0; img < n * c; img++) {
+    final xBase = img * inSpN;
+    final outBase = img * outSpN;
+    oCoord.fillRange(0, nd, 0);
+    for (int oi = 0; oi < outSpN; oi++) {
+      double sum = 0;
+      kCoord.fillRange(0, nd, 0);
+      for (int ki = 0; ki < kN; ki++) {
+        var xOff = 0;
+        var inside = true;
+        for (int a = 0; a < nd; a++) {
+          final ia = oCoord[a] * s[a] - pad[a] + kCoord[a] * d[a];
+          if (ia < 0 || ia >= inSp[a]) {
+            inside = false;
+            break;
+          }
+          xOff += ia * inStrides[a];
+        }
+        if (inside) sum += math.pow(xf[xBase + xOff].abs(), p).toDouble();
+        for (int a = nd - 1; a >= 0; a--) {
+          if (++kCoord[a] < kernel[a]) break;
+          kCoord[a] = 0;
+        }
+      }
+      out[outBase + oi] = math.pow(sum, 1.0 / p).toDouble();
+      for (int a = nd - 1; a >= 0; a--) {
+        if (++oCoord[a] < outSp[a]) break;
+        oCoord[a] = 0;
+      }
+    }
+  }
+  return Tensor.float(out, [n, c, ...outSp]);
+}
+
 /// Global pooling: reduce every spatial dim to 1 (shape [N, C, 1, ...]).
 Tensor opGlobalPool(Tensor x, {required bool isMax}) {
   final n = x.shape[0], c = x.shape[1];
@@ -1203,6 +1270,56 @@ Tensor opGlobalPool(Tensor x, {required bool isMax}) {
     }
   }
   return Tensor.float(out, [n, c, ...List.filled(x.rank - 2, 1)]);
+}
+
+Tensor opGlobalLpPool(Tensor x, {int p = 2}) {
+  final n = x.shape[0], c = x.shape[1];
+  final spN = _prod(x.shape.sublist(2));
+  final xf = x.asFloatList();
+  final out = Float32List(n * c);
+  for (int img = 0; img < n * c; img++) {
+    final base = img * spN;
+    double sum = 0;
+    for (int k = 0; k < spN; k++) {
+      sum += math.pow(xf[base + k].abs(), p).toDouble();
+    }
+    out[img] = math.pow(sum, 1.0 / p).toDouble();
+  }
+  return Tensor.float(out, [n, c, ...List.filled(x.rank - 2, 1)]);
+}
+
+Tensor opLRN(
+  Tensor x, {
+  required int size,
+  double alpha = 0.0001,
+  double beta = 0.75,
+  double bias = 1.0,
+}) {
+  if (x.rank < 3) {
+    throw ArgumentError('LRN requires at least 3 dims, got ${x.shape}');
+  }
+  final n = x.shape[0], c = x.shape[1];
+  final spN = _prod(x.shape.sublist(2));
+  final xf = x.asFloatList();
+  final out = Float32List(x.length);
+  final left = (size - 1) ~/ 2;
+  final right = size ~/ 2;
+  for (int b = 0; b < n; b++) {
+    for (int ch = 0; ch < c; ch++) {
+      final lo = math.max(0, ch - left);
+      final hi = math.min(c - 1, ch + right);
+      for (int s = 0; s < spN; s++) {
+        double sum = 0;
+        for (int k = lo; k <= hi; k++) {
+          final v = xf[(b * c + k) * spN + s];
+          sum += v * v;
+        }
+        final scale = math.pow(bias + alpha / size * sum, beta).toDouble();
+        out[(b * c + ch) * spN + s] = xf[(b * c + ch) * spN + s] / scale;
+      }
+    }
+  }
+  return Tensor.float(out, x.shape);
 }
 
 // ---------------------------------------------------------------------------

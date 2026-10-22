@@ -14,8 +14,8 @@ models** (QDQ, QOperator and int4 `MatMulNBits`). In practice this covers text
 embedders, rerankers, seq2seq translation with KV-cache, OCR, object detection,
 segmentation, diffusion VAEs, three ASR stacks, TTS and audio scoring — all
 verified against native ONNX Runtime (see [Verified models](#verified-models)).
-It is still not a complete ONNX runtime — see the operator list below for
-exactly what is covered.
+Coverage is **200 of the 202** standard ONNX operator schemas (through opset
+27): only `BitCast` and `ImageDecoder` are missing.
 
 ## Verified models
 
@@ -343,6 +343,11 @@ final ids = tok.encode('Machine learning in pure Dart.'); // [101, 3698, ... , 1
 
 ## Supported operators
 
+Coverage is **200 of the 202** standard ONNX operator schemas through opset 27.
+The two gaps are `BitCast` (full dtype reinterpretation needs raw storage for
+every numeric type) and `ImageDecoder` (no image-decoder dependency). ONNX
+Runtime's `com.microsoft` fused ops are listed separately below.
+
 - **Math:** `Add`, `Sub`, `Mul`, `Div`, `Pow`, `Sqrt`, `Reciprocal`, `Abs`,
   `Neg`, `Exp`, `Log`, `Relu`, `Erf`, `Sigmoid`, `Tanh`, `Cos`, `Sin`, `Clip`,
   `Sign`.
@@ -380,6 +385,12 @@ final ids = tok.encode('Machine learning in pure Dart.'); // [101, 3698, ... , 1
   `ScatterND`, `Split`, `NonZero`, `TopK`, `NonMaxSuppression`, `Upsample`
   (deprecated pre-Resize form), `Dropout` (inference identity), `STFT`,
   `Floor`, `Ceil`, `Round`.
+- **Sequence / optional:** `SequenceConstruct`, `SequenceEmpty`, `SequenceAt`,
+  `SequenceInsert`, `SequenceErase`, `SequenceLength`, `SequenceMap` (subgraph
+  per element), `SplitToSequence`, `ConcatFromSequence`, `Optional`,
+  `OptionalGetElement`, `OptionalHasElement`.
+- **Strings / text:** `StringConcat`, `StringSplit`, `StringNormalizer`,
+  `RegexFullMatch`, `TfIdfVectorizer`.
 - **Quantization:** QDQ format — `QuantizeLinear`, `DequantizeLinear`
   (per-tensor + per-axis, uint8/int8), `DynamicQuantizeLinear`; weight
   `DequantizeLinear` nodes constant-fold at load, so QDQ models run at float
@@ -399,9 +410,11 @@ final ids = tok.encode('Machine learning in pure Dart.'); // [101, 3698, ... , 1
   intermediate values have no other consumers; results stay within float
   rounding of the unfused graph.
 
-Tensors are float32 or int64 (int32 and bool are widened to int64), row-major
-(matching ONNX's own layout). An unimplemented op throws `UnsupportedError`
-naming the op.
+Numeric tensors are float32 (float16 and float64 are converted on load),
+int64, or compact uint8/int8 (int32 and bool are widened to int64). String,
+sequence and optional values use `StringTensor`, `SequenceTensor` and
+`OptionalTensor`. Layout is row-major (matching ONNX's own). An unimplemented
+op throws `UnsupportedError` naming the op.
 
 ## How it works
 

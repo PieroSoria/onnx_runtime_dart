@@ -7,12 +7,14 @@ library;
 
 import 'dart:math' as math;
 import 'dart:typed_data' hide Int64List;
+
 import 'execution_control.dart';
 import 'int64_storage.dart';
 
 // SIMD GEMM kernel on native targets (VM/AOT, where Float32x4 maps to real
 // SSE/NEON); portable scalar kernel on web targets where it's emulated.
-import 'gemm_kernel_scalar.dart' if (dart.library.ffi) 'gemm_kernel_simd.dart'
+import 'gemm_kernel_scalar.dart'
+    if (dart.library.ffi) 'gemm_kernel_simd.dart'
     as gemm;
 import 'onnx_proto_loader.dart' show float32ToHalfBits, halfToFloat32Bits;
 import 'tensor.dart';
@@ -180,7 +182,9 @@ Tensor? _arithFloatFast(Tensor a, Tensor b, _Arith op) {
       b.shape[a.rank - 1] == 1 &&
       a.shape[a.rank - 1] > 1 &&
       _shapeEq(
-          a.shape.sublist(0, a.rank - 1), b.shape.sublist(0, b.rank - 1))) {
+        a.shape.sublist(0, a.rank - 1),
+        b.shape.sublist(0, b.rank - 1),
+      )) {
     final d = a.shape[a.rank - 1];
     final rows = bn; // = an ~/ d
     final out = Float32List(an);
@@ -286,7 +290,10 @@ Tensor? _arithFloatFast(Tensor a, Tensor b, _Arith op) {
 }
 
 Tensor _elementwiseBinary(
-    Tensor a, Tensor b, double Function(double, double) op) {
+  Tensor a,
+  Tensor b,
+  double Function(double, double) op,
+) {
   final bothInt = !a.isFloat && !b.isFloat;
 
   // Fast path: identical shapes (the common case for residual adds etc.) —
@@ -445,11 +452,8 @@ Tensor opMul(Tensor a, Tensor b) =>
 /// (result takes the dividend's sign, `remainder`); false = integer/numpy mod
 /// (result takes the divisor's sign). The NSF source generator in RVC's decoder
 /// wraps sine phase with Mod.
-Tensor opMod(Tensor a, Tensor b, bool fmod) => _elementwiseBinary(
-      a,
-      b,
-      fmod ? (x, y) => x.remainder(y) : (x, y) => x % y,
-    );
+Tensor opMod(Tensor a, Tensor b, bool fmod) =>
+    _elementwiseBinary(a, b, fmod ? (x, y) => x.remainder(y) : (x, y) => x % y);
 Tensor opDiv(Tensor a, Tensor b) {
   // Integer division truncates toward zero per the ONNX spec (the generic
   // path would round the float quotient — off by one on length arithmetic
@@ -551,6 +555,140 @@ Tensor opHardSwish(Tensor a) =>
 Tensor opSoftplus(Tensor a) =>
     _elementwiseUnary(a, (x) => math.log(1 + math.exp(x)));
 Tensor opAtan(Tensor a) => _elementwiseUnary(a, math.atan);
+Tensor opAcos(Tensor a) => _elementwiseUnary(a, math.acos);
+Tensor opAsin(Tensor a) => _elementwiseUnary(a, math.asin);
+Tensor opTan(Tensor a) => _elementwiseUnary(a, math.tan);
+Tensor opCosh(Tensor a) =>
+    _elementwiseUnary(a, (x) => (math.exp(x) + math.exp(-x)) * 0.5);
+Tensor opSinh(Tensor a) =>
+    _elementwiseUnary(a, (x) => (math.exp(x) - math.exp(-x)) * 0.5);
+Tensor opAcosh(Tensor a) =>
+    _elementwiseUnary(a, (x) => math.log(x + math.sqrt(x * x - 1)));
+Tensor opAsinh(Tensor a) =>
+    _elementwiseUnary(a, (x) => math.log(x + math.sqrt(x * x + 1)));
+Tensor opAtanh(Tensor a) =>
+    _elementwiseUnary(a, (x) => 0.5 * math.log((1 + x) / (1 - x)));
+Tensor opMish(Tensor a) => _elementwiseUnary(a, (x) {
+  final sp = x > 20 ? x : math.log(1 + math.exp(x));
+  return x * _tanh(sp);
+});
+Tensor opSoftsign(Tensor a) => _elementwiseUnary(a, (x) => x / (1 + x.abs()));
+Tensor opCelu(Tensor a, double alpha) => _elementwiseUnary(
+  a,
+  (x) => math.max(0.0, x) + math.min(0.0, alpha * (math.exp(x / alpha) - 1)),
+);
+Tensor opSelu(Tensor a, double alpha, double gamma) => _elementwiseUnary(
+  a,
+  (x) => gamma * (x > 0 ? x : alpha * (math.exp(x) - 1)),
+);
+Tensor opShrink(Tensor a, double lambd, double bias) => _elementwiseUnary(
+  a,
+  (x) => x < -lambd ? x + bias : (x > lambd ? x - bias : 0.0),
+);
+Tensor opSwish(Tensor a, double alpha) =>
+    _elementwiseUnary(a, (x) => x / (1 + math.exp(-alpha * x)));
+Tensor opThresholdedRelu(Tensor a, double alpha) =>
+    _elementwiseUnary(a, (x) => x > alpha ? x : 0.0);
+
+Tensor opHardmax(Tensor x, int axis) {
+  final rank = x.shape.length;
+  final ax = axis < 0 ? axis + rank : axis;
+  final outerSize = x.shape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
+  final axisSize = x.shape[ax];
+  final innerSize = x.shape.sublist(ax + 1).fold<int>(1, (a, b) => a * b);
+  final outF = x.isFloat ? Float32List(x.length) : null;
+  final outI = x.isFloat ? null : Int64List(x.length);
+  for (int outer = 0; outer < outerSize; outer++) {
+    for (int inner = 0; inner < innerSize; inner++) {
+      final base = outer * axisSize * innerSize + inner;
+      var best = x.getD(base);
+      var bestIdx = 0;
+      for (int a = 1; a < axisSize; a++) {
+        final v = x.getD(base + a * innerSize);
+        if (v > best) {
+          best = v;
+          bestIdx = a;
+        }
+      }
+      if (outF != null) {
+        outF[base + bestIdx * innerSize] = 1;
+      } else {
+        outI![base + bestIdx * innerSize] = 1;
+      }
+    }
+  }
+  return x.isFloat
+      ? Tensor.float(outF!, x.shape)
+      : Tensor.int64(outI!, x.shape);
+}
+
+Tensor opLpNormalization(Tensor x, int axis, int p) {
+  final rank = x.shape.length;
+  final ax = axis < 0 ? axis + rank : axis;
+  final outerSize = x.shape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
+  final axisSize = x.shape[ax];
+  final innerSize = x.shape.sublist(ax + 1).fold<int>(1, (a, b) => a * b);
+  final out = Float32List(x.length);
+  for (int outer = 0; outer < outerSize; outer++) {
+    for (int inner = 0; inner < innerSize; inner++) {
+      final base = outer * axisSize * innerSize + inner;
+      double norm = 0;
+      for (int a = 0; a < axisSize; a++) {
+        norm += math.pow(x.getD(base + a * innerSize).abs(), p).toDouble();
+      }
+      norm = math.pow(norm, 1.0 / p).toDouble();
+      if (norm == 0) continue;
+      for (int a = 0; a < axisSize; a++) {
+        final idx = base + a * innerSize;
+        out[idx] = x.getD(idx) / norm;
+      }
+    }
+  }
+  return Tensor.float(out, x.shape);
+}
+
+Tensor opMeanVarianceNormalization(Tensor x, List<int> axes) {
+  final rank = x.shape.length;
+  final ax = axes.map((a) => a < 0 ? a + rank : a).toSet();
+  final counts = ax.fold<int>(1, (acc, a) => acc * x.shape[a]);
+  final outShape = [
+    for (int a = 0; a < rank; a++) ax.contains(a) ? 1 : x.shape[a],
+  ];
+  final outStrides = Tensor.filledFloat(outShape, 0).strides;
+  final sums = Float64List(outShape.fold<int>(1, (a, b) => a * b));
+  final squares = Float64List(sums.length);
+  final coords = List<int>.filled(rank, 0);
+  for (int idx = 0; idx < x.length; idx++) {
+    var outFlat = 0;
+    for (int a = 0; a < rank; a++) {
+      if (!ax.contains(a)) outFlat += coords[a] * outStrides[a];
+    }
+    final v = x.getD(idx);
+    sums[outFlat] += v;
+    squares[outFlat] += v * v;
+    for (int a = rank - 1; a >= 0; a--) {
+      if (++coords[a] < x.shape[a]) break;
+      coords[a] = 0;
+    }
+  }
+  final out = Float32List(x.length);
+  final outCoords = List<int>.filled(rank, 0);
+  for (int idx = 0; idx < x.length; idx++) {
+    var outFlat = 0;
+    for (int a = 0; a < rank; a++) {
+      if (!ax.contains(a)) outFlat += outCoords[a] * outStrides[a];
+    }
+    final mean = sums[outFlat] / counts;
+    final variance = squares[outFlat] / counts - mean * mean;
+    out[idx] = (x.getD(idx) - mean) / math.sqrt(variance + 1e-9);
+    for (int a = rank - 1; a >= 0; a--) {
+      if (++outCoords[a] < x.shape[a]) break;
+      outCoords[a] = 0;
+    }
+  }
+  return Tensor.float(out, x.shape);
+}
+
 Tensor opSign(Tensor a) => a.isFloat
     ? _elementwiseUnary(a, (x) => x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0))
     : _unaryInt(a, (x) => x > 0 ? 1 : (x < 0 ? -1 : 0));
@@ -586,7 +724,8 @@ double _erf(double x) {
   const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
   const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
   final t = 1.0 / (1.0 + p * x);
-  final y = 1.0 -
+  final y =
+      1.0 -
       (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-x * x);
   return sign * y;
 }
@@ -739,16 +878,17 @@ Tensor opTranspose(Tensor x, List<int> perm) {
 }
 
 Tensor opSqueeze(Tensor x, List<int>? axes) {
-  final ax = (axes ??
-          [
-            for (int k = 0; k < x.shape.length; k++)
-              if (x.shape[k] == 1) k
-          ])
-      .map((a) => a < 0 ? a + x.shape.length : a)
-      .toSet();
+  final ax =
+      (axes ??
+              [
+                for (int k = 0; k < x.shape.length; k++)
+                  if (x.shape[k] == 1) k,
+              ])
+          .map((a) => a < 0 ? a + x.shape.length : a)
+          .toSet();
   final newShape = [
     for (int k = 0; k < x.shape.length; k++)
-      if (!ax.contains(k)) x.shape[k]
+      if (!ax.contains(k)) x.shape[k],
   ];
   return x.reshape(newShape);
 }
@@ -773,6 +913,21 @@ Tensor opConcat(List<Tensor> inputs, int axis) {
   final ax = axis < 0 ? axis + rank : axis;
   final outShape = List<int>.from(inputs.first.shape);
   outShape[ax] = inputs.fold<int>(0, (sum, t) => sum + t.shape[ax]);
+
+  if (inputs.first is StringTensor) {
+    final outerSize = outShape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
+    final innerSize = outShape.sublist(ax + 1).fold<int>(1, (a, b) => a * b);
+    final out = <String>[];
+    for (int outer = 0; outer < outerSize; outer++) {
+      for (final t in inputs) {
+        final values = (t as StringTensor).strings;
+        final blockSize = t.shape[ax] * innerSize;
+        final srcStart = outer * blockSize;
+        out.addAll(values.sublist(srcStart, srcStart + blockSize));
+      }
+    }
+    return StringTensor(out, outShape);
+  }
 
   final isFloat = inputs.first.isFloat;
   final n = outShape.fold<int>(1, (a, b) => a * b);
@@ -815,7 +970,7 @@ Tensor opGather(Tensor data, Tensor indices, int axis) {
   final outShape = [
     ...data.shape.sublist(0, ax),
     ...idxShape,
-    ...data.shape.sublist(ax + 1)
+    ...data.shape.sublist(ax + 1),
   ];
 
   final outerSize = data.shape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
@@ -910,8 +1065,13 @@ Tensor opExpand(Tensor x, Tensor shapeT) {
   }
 }
 
-Tensor opSlice(Tensor x, List<int> starts, List<int> ends, List<int>? axes,
-    List<int>? steps) {
+Tensor opSlice(
+  Tensor x,
+  List<int> starts,
+  List<int> ends,
+  List<int>? axes,
+  List<int>? steps,
+) {
   final rank = x.shape.length;
   final ax = axes ?? List<int>.generate(starts.length, (k) => k);
   final st = steps ?? List<int>.filled(starts.length, 1);
@@ -940,17 +1100,36 @@ Tensor opSlice(Tensor x, List<int> starts, List<int> ends, List<int>? axes,
   for (int a = 0; a < rank; a++) {
     final cnt = normStep[a] > 0
         ? math.max(
-            0, (normEnd[a] - normStart[a] + normStep[a] - 1) ~/ normStep[a])
+            0,
+            (normEnd[a] - normStart[a] + normStep[a] - 1) ~/ normStep[a],
+          )
         : math.max(
-            0, (normStart[a] - normEnd[a] - normStep[a] - 1) ~/ (-normStep[a]));
+            0,
+            (normStart[a] - normEnd[a] - normStep[a] - 1) ~/ (-normStep[a]),
+          );
     outShape.add(cnt);
   }
 
   final n = outShape.fold<int>(1, (a, b) => a * b);
+  final srcStrides = x.strides;
+
+  if (x is StringTensor) {
+    final out = List<String>.filled(n, '');
+    for (int idx = 0; idx < n; idx++) {
+      final outCoords = _unflatten(idx, outShape);
+      int srcFlat = 0;
+      for (int a = 0; a < rank; a++) {
+        final coord = normStart[a] + outCoords[a] * normStep[a];
+        srcFlat += coord * srcStrides[a];
+      }
+      out[idx] = x.strings[srcFlat];
+    }
+    return StringTensor(out, outShape);
+  }
+
   final isFloat = x.isFloat;
   final outF = isFloat ? Float32List(n) : null;
   final outI = isFloat ? null : Int64List(n);
-  final srcStrides = x.strides;
 
   for (int idx = 0; idx < n; idx++) {
     final outCoords = _unflatten(idx, outShape);
@@ -984,7 +1163,8 @@ Tensor opReduceMean(Tensor x, List<int>? axes, bool keepdims) {
   // LayerNorm's last-axis mean and CNN global-average pooling over NCHW's
   // spatial axes: each output is the mean of one contiguous row.
   final firstReducedAxis = rank - ax.length;
-  final reducesTrailingBlock = ax.isNotEmpty &&
+  final reducesTrailingBlock =
+      ax.isNotEmpty &&
       firstReducedAxis >= 0 &&
       List.generate(ax.length, (k) => firstReducedAxis + k).every(ax.contains);
   if (x.isFloat && reducesTrailingBlock) {
@@ -1005,14 +1185,14 @@ Tensor opReduceMean(Tensor x, List<int>? axes, bool keepdims) {
     final shape = keepdims
         ? [
             ...x.shape.sublist(0, firstReducedAxis),
-            ...List.filled(ax.length, 1)
+            ...List.filled(ax.length, 1),
           ]
         : x.shape.sublist(0, firstReducedAxis);
     return Tensor.float(out, shape);
   }
 
   final outShapeFull = [
-    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k]
+    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k],
   ];
   final reducedCount = ax.fold<int>(1, (acc, k) => acc * x.shape[k]);
 
@@ -1037,7 +1217,7 @@ Tensor opReduceMean(Tensor x, List<int>? axes, bool keepdims) {
   if (keepdims) return Tensor.float(out, outShapeFull);
   final squeezedShape = [
     for (int k = 0; k < rank; k++)
-      if (!ax.contains(k)) x.shape[k]
+      if (!ax.contains(k)) x.shape[k],
   ];
   return Tensor.float(out, squeezedShape);
 }
@@ -1049,7 +1229,7 @@ Tensor opReduceProd(Tensor x, List<int>? axes, bool keepdims) {
       .map((a) => a < 0 ? a + rank : a)
       .toSet();
   final outShapeFull = [
-    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k]
+    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k],
   ];
   final n = outShapeFull.fold<int>(1, (a, b) => a * b);
   final prods = Float64List(n)..fillRange(0, n, 1);
@@ -1070,7 +1250,7 @@ Tensor opReduceProd(Tensor x, List<int>? axes, bool keepdims) {
       ? outShapeFull
       : [
           for (int k = 0; k < rank; k++)
-            if (!ax.contains(k)) x.shape[k]
+            if (!ax.contains(k)) x.shape[k],
         ];
   if (x.isFloat) {
     final out = Float32List(n);
@@ -1135,6 +1315,60 @@ Tensor opRandomUniform(List<int> shape, double low, double high, int? seed) {
   return Tensor.float(out, shape);
 }
 
+Tensor opRandomUniformLike(Tensor x, double low, double high, int? seed) =>
+    opRandomUniform(x.shape, low, high, seed);
+
+Tensor opBernoulli(Tensor x, {int? seed, int? dtype}) {
+  final n = x.length;
+  final rng = math.Random(seed ?? 1234567);
+  final asFloat = dtype == null || dtype == 1 || dtype == 10 || dtype == 11;
+  if (asFloat) {
+    final out = Float32List(n);
+    for (int k = 0; k < n; k++) {
+      out[k] = rng.nextDouble() < x.getD(k) ? 1 : 0;
+    }
+    return Tensor.float(out, x.shape);
+  }
+  final out = Int64List(n);
+  for (int k = 0; k < n; k++) {
+    out[k] = rng.nextDouble() < x.getD(k) ? 1 : 0;
+  }
+  return Tensor.int64(out, x.shape);
+}
+
+Tensor opMultinomial(Tensor x, int sampleSize, {int? seed}) {
+  if (x.rank != 2) {
+    throw ArgumentError('Multinomial requires a rank-2 input, got ${x.shape}');
+  }
+  final batch = x.shape[0], classes = x.shape[1];
+  final rng = math.Random(seed ?? 1234567);
+  final out = Int64List(batch * sampleSize);
+  final cumulative = Float64List(classes);
+  for (int b = 0; b < batch; b++) {
+    final base = b * classes;
+    double total = 0;
+    for (int c = 0; c < classes; c++) {
+      total += x.getD(base + c);
+      cumulative[c] = total;
+    }
+    if (total <= 0) {
+      throw ArgumentError('Multinomial input probabilities must sum > 0');
+    }
+    for (int s = 0; s < sampleSize; s++) {
+      final r = rng.nextDouble() * total;
+      var chosen = classes - 1;
+      for (int c = 0; c < classes; c++) {
+        if (r < cumulative[c]) {
+          chosen = c;
+          break;
+        }
+      }
+      out[b * sampleSize + s] = chosen;
+    }
+  }
+  return Tensor.int64(out, [batch, sampleSize]);
+}
+
 /// `ReduceL2` — the L2 norm `sqrt(sum(x^2))` over the given axes (VITS/RVC flow
 /// weight-norm uses it heavily).
 Tensor opReduceL2(Tensor x, List<int>? axes, bool keepdims) {
@@ -1151,16 +1385,21 @@ Tensor opReduceL2(Tensor x, List<int>? axes, bool keepdims) {
 /// [splitSizes] when given, else evenly (ceil-divided, last part smaller —
 /// the opset-18 `num_outputs` rule, which reduces to equal parts when the
 /// axis divides evenly).
-List<Tensor> opSplit(Tensor x, int axis, int numOutputs,
-    [List<int>? splitSizes]) {
+List<Tensor> opSplit(
+  Tensor x,
+  int axis,
+  int numOutputs, [
+  List<int>? splitSizes,
+]) {
   final ax = axis < 0 ? axis + x.rank : axis;
   final dim = x.shape[ax];
-  final sizes = splitSizes ??
+  final sizes =
+      splitSizes ??
       () {
         final chunk = (dim + numOutputs - 1) ~/ numOutputs;
         return [
           for (int i = 0; i < numOutputs; i++)
-            i < numOutputs - 1 ? chunk : dim - chunk * (numOutputs - 1)
+            i < numOutputs - 1 ? chunk : dim - chunk * (numOutputs - 1),
         ];
       }();
   final outs = <Tensor>[];
@@ -1206,11 +1445,18 @@ Tensor opGlu(Tensor x, int axis) {
 /// ONNX graph does its own `Pad` beforehand). [onesided] keeps
 /// `dftSize/2 + 1` bins. Odd or non-power-of-2 frame lengths are fine — bins
 /// come from a direct DFT over a single-period twiddle table.
-Tensor opSTFT(Tensor signal, int frameStep, Tensor? window, int? frameLength,
-    {bool onesided = true}) {
+Tensor opSTFT(
+  Tensor signal,
+  int frameStep,
+  Tensor? window,
+  int? frameLength, {
+  bool onesided = true,
+}) {
   // Signal is [batch, len] or [batch, len, 1].
-  assert(signal.rank == 2 || (signal.rank == 3 && signal.shape[2] == 1),
-      'STFT supports real signals only');
+  assert(
+    signal.rank == 2 || (signal.rank == 3 && signal.shape[2] == 1),
+    'STFT supports real signals only',
+  );
   final batch = signal.shape[0], len = signal.shape[1];
   final n = frameLength ?? window!.length;
   final win = window?.asFloatList();
@@ -1252,17 +1498,41 @@ Tensor opSTFT(Tensor signal, int frameStep, Tensor? window, int? frameLength,
   return Tensor.float(out, [batch, frames, bins, 2]);
 }
 
+Tensor opWindow(String type, int size, {bool periodic = true}) {
+  if (size < 0) throw ArgumentError('window size must be nonnegative');
+  final out = Float32List(size);
+  if (size == 1) {
+    out[0] = 1;
+    return Tensor.float(out, [size]);
+  }
+  final den = periodic ? size : size - 1;
+  for (int n = 0; n < size; n++) {
+    final x = 2 * math.pi * n / den;
+    out[n] = switch (type) {
+      'Hann' => 0.5 - 0.5 * math.cos(x),
+      'Hamming' => 0.54 - 0.46 * math.cos(x),
+      'Blackman' => 0.42 - 0.5 * math.cos(x) + 0.08 * math.cos(2 * x),
+      _ => throw ArgumentError('Unknown window type "$type"'),
+    };
+  }
+  return Tensor.float(out, [size]);
+}
+
 /// `ReduceMax` / `ReduceMin` (dtype-preserving, unlike the mean/sum
 /// reductions which are float by definition).
-Tensor opReduceMinMax(Tensor x, List<int>? axes, bool keepdims,
-    {required bool isMax}) {
+Tensor opReduceMinMax(
+  Tensor x,
+  List<int>? axes,
+  bool keepdims, {
+  required bool isMax,
+}) {
   final rank = x.shape.length;
   final ax =
       (axes == null || axes.isEmpty ? List<int>.generate(rank, (k) => k) : axes)
           .map((a) => a < 0 ? a + rank : a)
           .toSet();
   final outShapeFull = [
-    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k]
+    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k],
   ];
   final n = outShapeFull.fold<int>(1, (a, b) => a * b);
   final outStridesFull = Tensor.filledFloat(outShapeFull, 0).strides;
@@ -1287,7 +1557,7 @@ Tensor opReduceMinMax(Tensor x, List<int>? axes, bool keepdims,
       ? outShapeFull
       : [
           for (int k = 0; k < rank; k++)
-            if (!ax.contains(k)) x.shape[k]
+            if (!ax.contains(k)) x.shape[k],
         ];
   if (x.isFloat) {
     final out = Float32List(n);
@@ -1380,8 +1650,8 @@ Tensor opLogSoftmax(Tensor x, int axis) {
       double sum = 0;
       for (int a = 0; a < axisSize; a++) {
         sum += math.exp(
-            x.getD(outer * axisSize * innerSize + a * innerSize + inner) -
-                maxV);
+          x.getD(outer * axisSize * innerSize + a * innerSize + inner) - maxV,
+        );
       }
       final logSum = maxV + math.log(sum);
       for (int a = 0; a < axisSize; a++) {
@@ -1394,7 +1664,12 @@ Tensor opLogSoftmax(Tensor x, int axis) {
 }
 
 Tensor opLayerNormalization(
-    Tensor x, Tensor scale, Tensor bias, int axis, double epsilon) {
+  Tensor x,
+  Tensor scale,
+  Tensor bias,
+  int axis,
+  double epsilon,
+) {
   final rank = x.shape.length;
   final ax = axis < 0 ? axis + rank : axis;
   final outerSize = x.shape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
@@ -1500,8 +1775,10 @@ Tensor opRMSNorm(Tensor x, Tensor gamma, int axis, double eps) {
   // The original chain's rank-1 Mul(gamma) broadcasts along the LAST axis
   // regardless of the reduce axis — enforce the shapes that makes valid.
   if (gf.length != x.shape[x.rank - 1]) {
-    throw ArgumentError('RMSNorm gamma length ${gf.length} != last dim '
-        '${x.shape[x.rank - 1]}');
+    throw ArgumentError(
+      'RMSNorm gamma length ${gf.length} != last dim '
+      '${x.shape[x.rank - 1]}',
+    );
   }
   final out = Float32List(xf.length);
   if (ax == x.rank - 1) {
@@ -1564,40 +1841,59 @@ Tensor opRMSNorm(Tensor x, Tensor gamma, int axis, double eps) {
 /// `[batch, kvNumHeads, pastLen+seq, headSize]` concatenation (the RoPE'd K and
 /// the raw V), ready to feed back as the next step's past. Query token `i` has
 /// absolute position `pastLen+i` and attends causally to keys `0..pastLen+i`.
-List<Tensor> opGroupQueryAttention(Tensor q, Tensor k, Tensor v,
-    {required int numHeads,
-    required int kvNumHeads,
-    double? scale,
-    bool doRotary = false,
-    bool rotaryInterleaved = false,
-    Tensor? cosCache,
-    Tensor? sinCache,
-    Tensor? pastKey,
-    Tensor? pastValue,
-    Tensor? attentionBias,
-    double softcap = 0,
-    int localWindow = -1}) {
+List<Tensor> opGroupQueryAttention(
+  Tensor q,
+  Tensor k,
+  Tensor v, {
+  required int numHeads,
+  required int kvNumHeads,
+  double? scale,
+  bool doRotary = false,
+  bool rotaryInterleaved = false,
+  Tensor? cosCache,
+  Tensor? sinCache,
+  Tensor? pastKey,
+  Tensor? pastValue,
+  Tensor? attentionBias,
+  double softcap = 0,
+  int localWindow = -1,
+}) {
   if (softcap != 0 || localWindow > 0) {
     throw UnsupportedError(
-        'GroupQueryAttention: softcap / local_window not supported');
+      'GroupQueryAttention: softcap / local_window not supported',
+    );
   }
   final batch = q.shape[0], seq = q.shape[1];
   final headSize = q.shape[2] ~/ numHeads;
   final group = numHeads ~/ kvNumHeads;
   final kvHidden = kvNumHeads * headSize;
-  final pastLen =
-      (pastKey != null && pastKey.shape.length == 4) ? pastKey.shape[2] : 0;
+  final pastLen = (pastKey != null && pastKey.shape.length == 4)
+      ? pastKey.shape[2]
+      : 0;
   final totalLen = pastLen + seq;
 
   var qq = q, kk = k;
   if (doRotary) {
     final pos = Tensor.int64(
-        Int64List.fromList([for (int s = 0; s < seq; s++) pastLen + s]),
-        [1, seq]);
-    qq = opRotaryEmbedding(q, pos, cosCache!, sinCache!,
-        interleaved: rotaryInterleaved, numHeads: numHeads);
-    kk = opRotaryEmbedding(k, pos, cosCache, sinCache,
-        interleaved: rotaryInterleaved, numHeads: kvNumHeads);
+      Int64List.fromList([for (int s = 0; s < seq; s++) pastLen + s]),
+      [1, seq],
+    );
+    qq = opRotaryEmbedding(
+      q,
+      pos,
+      cosCache!,
+      sinCache!,
+      interleaved: rotaryInterleaved,
+      numHeads: numHeads,
+    );
+    kk = opRotaryEmbedding(
+      k,
+      pos,
+      cosCache,
+      sinCache,
+      interleaved: rotaryInterleaved,
+      numHeads: kvNumHeads,
+    );
   }
   final s = scale ?? (1.0 / math.sqrt(headSize));
   final qf = qq.f!, kf = kk.f!, vf = v.f ?? v.asFloatList();
@@ -1657,8 +1953,9 @@ List<Tensor> opGroupQueryAttention(Tensor q, Tensor k, Tensor v,
       }
       scores.fillRange(0, seq * totalLen, 0);
       gemm.matmulKernel(qh, 0, kt, 0, scores, 0, seq, headSize, totalLen);
-      final biasBase =
-          bias == null ? 0 : (b * biasHeads + (h % biasHeads)) * seq * totalLen;
+      final biasBase = bias == null
+          ? 0
+          : (b * biasHeads + (h % biasHeads)) * seq * totalLen;
       for (int i = 0; i < seq; i++) {
         final row = i * totalLen;
         // token i (absolute position pastLen+i) attends causally to keys
@@ -1689,7 +1986,16 @@ List<Tensor> opGroupQueryAttention(Tensor q, Tensor k, Tensor v,
       // per-head V slice is contiguous at baseP.
       ctx.fillRange(0, seq * headSize, 0);
       gemm.matmulKernel(
-          scores, 0, presentV, baseP, ctx, 0, seq, totalLen, headSize);
+        scores,
+        0,
+        presentV,
+        baseP,
+        ctx,
+        0,
+        seq,
+        totalLen,
+        headSize,
+      );
       for (int i = 0; i < seq; i++) {
         final dst = (b * seq + i) * numHeads * headSize + h * headSize;
         for (int d = 0; d < headSize; d++) {
@@ -1710,8 +2016,14 @@ List<Tensor> opGroupQueryAttention(Tensor q, Tensor k, Tensor v,
 /// is an additive `[batch, heads, seq, kvSeq]` mask added to the scaled
 /// scores before softmax. Q/K/V may carry different head counts already
 /// expanded to match (grouped-query attention is expanded upstream here).
-Tensor opMultiHeadAttention(Tensor q, Tensor k, Tensor v, Tensor? attentionBias,
-    {required int numHeads, double? scale}) {
+Tensor opMultiHeadAttention(
+  Tensor q,
+  Tensor k,
+  Tensor v,
+  Tensor? attentionBias, {
+  required int numHeads,
+  double? scale,
+}) {
   final batch = q.shape[0], seq = q.shape[1], hidden = q.shape[2];
   final headSize = hidden ~/ numHeads;
   final kvSeq = k.shape[1];
@@ -1748,8 +2060,9 @@ Tensor opMultiHeadAttention(Tensor q, Tensor k, Tensor v, Tensor? attentionBias,
       // scores = Q·Kᵀ, then scale + bias + row softmax.
       scores.fillRange(0, seq * kvSeq, 0);
       gemm.matmulKernel(qh, 0, kt, 0, scores, 0, seq, headSize, kvSeq);
-      final biasBase =
-          bias == null ? 0 : (b * biasHeads + (h % biasHeads)) * seq * kvSeq;
+      final biasBase = bias == null
+          ? 0
+          : (b * biasHeads + (h % biasHeads)) * seq * kvSeq;
       for (int i = 0; i < seq; i++) {
         final row = i * kvSeq;
         double maxV = double.negativeInfinity;
@@ -1803,12 +2116,14 @@ Tensor opFusedSDPA(Tensor a, Tensor b, Tensor v, Tensor mask, double scale) {
   final maskLastStride = mask.shape.isNotEmpty && mask.shape.last == t ? 1 : 0;
   final rowCoords = List<int>.filled(rowShape.length, 0);
   // Mask shape aligned against the full score shape, minus its last axis.
-  final maskRowShape =
-      mask.rank == 0 ? const <int>[] : mask.shape.sublist(0, mask.rank - 1);
+  final maskRowShape = mask.rank == 0
+      ? const <int>[]
+      : mask.shape.sublist(0, mask.rank - 1);
 
   for (int r = 0; r < rows; r++) {
     final base = r * t;
-    final mBase = _flattenBroadcast(rowCoords, maskRowShape) *
+    final mBase =
+        _flattenBroadcast(rowCoords, maskRowShape) *
         (mask.rank == 0 ? 0 : mask.shape.last);
     double max = double.negativeInfinity;
     for (int j = 0; j < t; j++) {
@@ -1834,11 +2149,15 @@ Tensor opFusedSDPA(Tensor a, Tensor b, Tensor v, Tensor mask, double scale) {
 }
 
 /// Gemm: Y = alpha * A' * B' + beta * C  (A'/B' optionally transposed)
-Tensor opGemm(Tensor a, Tensor b, Tensor? c,
-    {double alpha = 1.0,
-    double beta = 1.0,
-    bool transA = false,
-    bool transB = false}) {
+Tensor opGemm(
+  Tensor a,
+  Tensor b,
+  Tensor? c, {
+  double alpha = 1.0,
+  double beta = 1.0,
+  bool transA = false,
+  bool transB = false,
+}) {
   final at = transA ? opTranspose(a, [1, 0]) : a;
   final bt = transB ? opTranspose(b, [1, 0]) : b;
   final mm = opMatMul(at, bt);
@@ -1876,8 +2195,10 @@ Tensor opEinsum(String equation, List<Tensor> inputs) {
   final arrowSplit = eq.split('->');
   final terms = arrowSplit[0].split(',');
   if (terms.length != inputs.length || inputs.length > 2) {
-    throw UnsupportedError('Einsum: ${inputs.length} inputs vs '
-        '${terms.length} terms in "$equation" (max 2 supported)');
+    throw UnsupportedError(
+      'Einsum: ${inputs.length} inputs vs '
+      '${terms.length} terms in "$equation" (max 2 supported)',
+    );
   }
 
   // Label -> dimension size, checked for consistency across operands.
@@ -1885,8 +2206,10 @@ Tensor opEinsum(String equation, List<Tensor> inputs) {
   final counts = <String, int>{};
   for (int t = 0; t < terms.length; t++) {
     if (terms[t].length != inputs[t].rank) {
-      throw ArgumentError('Einsum term "${terms[t]}" vs rank '
-          '${inputs[t].rank} operand');
+      throw ArgumentError(
+        'Einsum term "${terms[t]}" vs rank '
+        '${inputs[t].rank} operand',
+      );
     }
     for (int a = 0; a < terms[t].length; a++) {
       final l = terms[t][a];
@@ -1903,15 +2226,16 @@ Tensor opEinsum(String equation, List<Tensor> inputs) {
       ? arrowSplit[1]
       : ([
           for (final l in (counts.keys.toList()..sort()))
-            if (counts[l] == 1) l
+            if (counts[l] == 1) l,
         ].join());
   if (outTerm.split('').toSet().length != outTerm.length) {
     throw UnsupportedError(
-        'Einsum: repeated output labels not supported ("$equation")');
+      'Einsum: repeated output labels not supported ("$equation")',
+    );
   }
   final sumLabels = [
     for (final l in sizeOf.keys)
-      if (!outTerm.contains(l)) l
+      if (!outTerm.contains(l)) l,
   ]..sort();
 
   // Global coordinate order: output labels then contraction labels.
@@ -1964,7 +2288,9 @@ Tensor opEinsum(String equation, List<Tensor> inputs) {
   // Output dtype follows the inputs (integer einsum stays integer).
   if (inputs.every((t) => !t.isFloat)) {
     return Tensor.int64(
-        Int64List.fromList([for (final v in out) v.round()]), outShape);
+      Int64List.fromList([for (final v in out) v.round()]),
+      outShape,
+    );
   }
   return Tensor.float(out, outShape);
 }
@@ -2071,8 +2397,11 @@ Tensor _boolBinary(Tensor a, Tensor b, bool Function(double, double) p) {
   final coords = List<int>.filled(outShape.length, 0);
   final out = Int64List(n);
   for (int idx = 0; idx < n; idx++) {
-    out[idx] = p(a.getD(_flattenBroadcast(coords, a.shape)),
-            b.getD(_flattenBroadcast(coords, b.shape)))
+    out[idx] =
+        p(
+          a.getD(_flattenBroadcast(coords, a.shape)),
+          b.getD(_flattenBroadcast(coords, b.shape)),
+        )
         ? 1
         : 0;
     for (int k = outShape.length - 1; k >= 0; k--) {
@@ -2094,6 +2423,59 @@ Tensor opAnd(Tensor a, Tensor b) =>
 Tensor opOr(Tensor a, Tensor b) =>
     _boolBinary(a, b, (x, y) => x != 0 || y != 0);
 Tensor opNot(Tensor a) => _unaryInt(a, (x) => x != 0 ? 0 : 1);
+Tensor opXor(Tensor a, Tensor b) =>
+    _boolBinary(a, b, (x, y) => (x != 0) != (y != 0));
+
+Tensor _intBinary(Tensor a, Tensor b, int Function(int, int) op) {
+  if (_shapeEq(a.shape, b.shape)) {
+    final n = a.length;
+    final out = Int64List(n);
+    for (int k = 0; k < n; k++) {
+      out[k] = op(a.getI(k), b.getI(k));
+    }
+    return Tensor.int64(out, a.shape);
+  }
+  if (b.length == 1 && a.rank >= b.rank) {
+    final n = a.length;
+    final out = Int64List(n);
+    final y = b.getI(0);
+    for (int k = 0; k < n; k++) {
+      out[k] = op(a.getI(k), y);
+    }
+    return Tensor.int64(out, a.shape);
+  }
+  if (a.length == 1 && b.rank >= a.rank) {
+    final n = b.length;
+    final out = Int64List(n);
+    final x = a.getI(0);
+    for (int k = 0; k < n; k++) {
+      out[k] = op(x, b.getI(k));
+    }
+    return Tensor.int64(out, b.shape);
+  }
+  final outShape = _broadcastShape(a.shape, b.shape);
+  final n = outShape.fold<int>(1, (x, y) => x * y);
+  final coords = List<int>.filled(outShape.length, 0);
+  final out = Int64List(n);
+  for (int idx = 0; idx < n; idx++) {
+    out[idx] = op(
+      a.getI(_flattenBroadcast(coords, a.shape)),
+      b.getI(_flattenBroadcast(coords, b.shape)),
+    );
+    for (int k = outShape.length - 1; k >= 0; k--) {
+      if (++coords[k] < outShape[k]) break;
+      coords[k] = 0;
+    }
+  }
+  return Tensor.int64(out, outShape);
+}
+
+Tensor opBitwiseAnd(Tensor a, Tensor b) => _intBinary(a, b, (x, y) => x & y);
+Tensor opBitwiseOr(Tensor a, Tensor b) => _intBinary(a, b, (x, y) => x | y);
+Tensor opBitwiseXor(Tensor a, Tensor b) => _intBinary(a, b, (x, y) => x ^ y);
+Tensor opBitwiseNot(Tensor a) => _unaryInt(a, (x) => ~x);
+Tensor opBitShift(Tensor a, Tensor b, {required bool left}) =>
+    _intBinary(a, b, (x, y) => left ? x << y : x >> y);
 
 /// `IsNaN` / `IsInf` — bool (int64 0/1) mask over a float tensor. Integer
 /// tensors are never NaN/Inf, so the result is all-zero.
@@ -2109,15 +2491,19 @@ Tensor opIsNaN(Tensor a) {
   return Tensor.int64(out, a.shape);
 }
 
-Tensor opIsInf(Tensor a,
-    {bool detectPositive = true, bool detectNegative = true}) {
+Tensor opIsInf(
+  Tensor a, {
+  bool detectPositive = true,
+  bool detectNegative = true,
+}) {
   final n = a.length;
   final out = Int64List(n);
   if (a.isFloat) {
     final af = a.f!;
     for (int k = 0; k < n; k++) {
       final v = af[k];
-      out[k] = (v.isInfinite &&
+      out[k] =
+          (v.isInfinite &&
               ((v > 0 && detectPositive) || (v < 0 && detectNegative)))
           ? 1
           : 0;
@@ -2130,11 +2516,103 @@ Tensor opMax(List<Tensor> ins) =>
     ins.reduce((a, b) => _elementwiseBinary(a, b, math.max));
 Tensor opMin(List<Tensor> ins) =>
     ins.reduce((a, b) => _elementwiseBinary(a, b, math.min));
+Tensor opSum(List<Tensor> ins) => ins.reduce(opAdd);
+Tensor opMean(List<Tensor> ins) {
+  final sum = ins.reduce(opAdd);
+  final out = Float32List(sum.length);
+  final sf = sum.asFloatList();
+  for (int k = 0; k < out.length; k++) {
+    out[k] = sf[k] / ins.length;
+  }
+  return Tensor.float(out, sum.shape);
+}
+
+Tensor opNegativeLogLikelihoodLoss(
+  Tensor input,
+  Tensor target,
+  Tensor? weight, {
+  String reduction = 'mean',
+  int? ignoreIndex,
+}) {
+  final classes = input.shape[1];
+  final batch = input.shape[0];
+  final spatial = batch == 0 ? 0 : target.length ~/ batch;
+  final wf = weight?.asFloatList();
+  final none = Float32List(target.length);
+  double total = 0;
+  int count = 0;
+  for (int b = 0; b < batch; b++) {
+    for (int s = 0; s < spatial; s++) {
+      final t = target.getI(b * spatial + s);
+      if (ignoreIndex != null && t == ignoreIndex) continue;
+      final idx = (b * classes + t) * spatial + s;
+      final w = wf == null ? 1.0 : wf[t];
+      final loss = -w * input.getD(idx);
+      none[b * spatial + s] = loss;
+      total += loss;
+      count++;
+    }
+  }
+  if (reduction == 'none') return Tensor.float(none, target.shape);
+  if (reduction == 'sum') return Tensor.scalarFloat(total);
+  return Tensor.scalarFloat(count == 0 ? 0 : total / count);
+}
+
+List<Tensor> opSoftmaxCrossEntropyLoss(
+  Tensor scores,
+  Tensor labels,
+  Tensor? weight, {
+  String reduction = 'mean',
+  int? ignoreIndex,
+  bool wantLogProb = false,
+}) {
+  final batch = scores.shape[0];
+  final classes = scores.shape[1];
+  final spatial = scores.length ~/ (batch * classes);
+  final logProb = Float32List(scores.length);
+  final losses = Float32List(batch * spatial);
+  final wf = weight?.asFloatList();
+  double total = 0;
+  int count = 0;
+  for (int b = 0; b < batch; b++) {
+    for (int s = 0; s < spatial; s++) {
+      final base = b * classes * spatial + s;
+      var maxV = double.negativeInfinity;
+      for (int c = 0; c < classes; c++) {
+        final v = scores.getD(base + c * spatial);
+        if (v > maxV) maxV = v;
+      }
+      double sum = 0;
+      for (int c = 0; c < classes; c++) {
+        sum += math.exp(scores.getD(base + c * spatial) - maxV);
+      }
+      final logSum = maxV + math.log(sum);
+      for (int c = 0; c < classes; c++) {
+        logProb[base + c * spatial] = scores.getD(base + c * spatial) - logSum;
+      }
+      final t = labels.getI(b * spatial + s);
+      if (ignoreIndex != null && t == ignoreIndex) continue;
+      final w = wf == null ? 1.0 : wf[t];
+      final loss = -w * logProb[base + t * spatial];
+      losses[b * spatial + s] = loss;
+      total += loss;
+      count++;
+    }
+  }
+  final lossTensor = reduction == 'none'
+      ? Tensor.float(losses, labels.shape)
+      : Tensor.scalarFloat(
+          reduction == 'sum' ? total : (count == 0 ? 0 : total / count),
+        );
+  return [lossTensor, if (wantLogProb) Tensor.float(logProb, scores.shape)];
+}
 
 /// Element-wise select: `cond ? a : b`, broadcasting all three inputs.
 Tensor opWhere(Tensor cond, Tensor a, Tensor b) {
-  final outShape =
-      _broadcastShape(_broadcastShape(cond.shape, a.shape), b.shape);
+  final outShape = _broadcastShape(
+    _broadcastShape(cond.shape, a.shape),
+    b.shape,
+  );
   final n = outShape.fold<int>(1, (x, y) => x * y);
   final bothInt = !a.isFloat && !b.isFloat;
   final coords = List<int>.filled(outShape.length, 0);
@@ -2179,8 +2657,14 @@ Tensor opSize(Tensor x) => Tensor.scalarInt(x.length);
 /// first `rotaryDim` of each head is rotated (the tail passes through);
 /// `interleaved` selects the GPT-J pairing, else the GPT-NeoX rotate-half.
 Tensor opRotaryEmbedding(
-    Tensor x, Tensor positionIds, Tensor cosCache, Tensor sinCache,
-    {bool interleaved = false, int numHeads = 0, int rotaryEmbeddingDim = 0}) {
+  Tensor x,
+  Tensor positionIds,
+  Tensor cosCache,
+  Tensor sinCache, {
+  bool interleaved = false,
+  int numHeads = 0,
+  int rotaryEmbeddingDim = 0,
+}) {
   final xf = x.f ?? x.asFloatList();
   final cos = cosCache.asFloatList(), sin = sinCache.asFloatList();
   final pos = positionIds.asIntList();
@@ -2255,8 +2739,13 @@ Tensor opRandomNormalFill(List<int> shape, double mean) {
 
 /// `ArgMax` / `ArgMin` along [axis]; ties resolve to the first (or, with
 /// [selectLastIndex], the last) occurrence.
-Tensor opArgMinMax(Tensor x, int axis, bool keepdims,
-    {required bool isMax, bool selectLastIndex = false}) {
+Tensor opArgMinMax(
+  Tensor x,
+  int axis,
+  bool keepdims, {
+  required bool isMax,
+  bool selectLastIndex = false,
+}) {
   final ax = axis < 0 ? axis + x.rank : axis;
   final dim = x.shape[ax];
   int outer = 1, inner = 1;
@@ -2291,7 +2780,7 @@ Tensor opArgMinMax(Tensor x, int axis, bool keepdims,
   }
   final shape = [
     for (int a = 0; a < x.rank; a++)
-      if (a != ax) x.shape[a] else if (keepdims) 1
+      if (a != ax) x.shape[a] else if (keepdims) 1,
   ];
   return Tensor.int64(out, shape);
 }
@@ -2357,7 +2846,9 @@ List<Tensor> opTopK(Tensor x, int k, {int axis = -1, bool largest = true}) {
     x.isFloat
         ? vT
         : Tensor.int64(
-            Int64List.fromList([for (final v in values) v.toInt()]), outShape),
+            Int64List.fromList([for (final v in values) v.toInt()]),
+            outShape,
+          ),
     Tensor.int64(indices, outShape),
   ];
 }
@@ -2365,11 +2856,14 @@ List<Tensor> opTopK(Tensor x, int k, {int axis = -1, bool largest = true}) {
 /// `NonMaxSuppression` — greedy per-(batch, class) suppression. Returns
 /// `[num_selected, 3]` int64 rows of (batch, class, boxIndex), in
 /// batch-major, class-major, descending-score order (matching ORT).
-Tensor opNonMaxSuppression(Tensor boxes, Tensor scores,
-    {int maxOutputBoxesPerClass = 0,
-    double iouThreshold = 0,
-    double? scoreThreshold,
-    bool centerPointBox = false}) {
+Tensor opNonMaxSuppression(
+  Tensor boxes,
+  Tensor scores, {
+  int maxOutputBoxesPerClass = 0,
+  double iouThreshold = 0,
+  double? scoreThreshold,
+  bool centerPointBox = false,
+}) {
   final nBatch = boxes.shape[0], nBox = boxes.shape[1];
   final nClass = scores.shape[1];
   final bf = boxes.asFloatList(), sf = scores.asFloatList();
@@ -2437,6 +2931,51 @@ Tensor opNonMaxSuppression(Tensor boxes, Tensor scores,
 
 /// `Trilu` — keeps the upper (or lower) triangle of the last two dims,
 /// zeroing the rest; [k] shifts the diagonal.
+Tensor opDet(Tensor x) {
+  final rank = x.rank;
+  if (rank < 2 || x.shape[rank - 2] != x.shape[rank - 1]) {
+    throw ArgumentError('Det requires square matrices, got ${x.shape}');
+  }
+  final n = x.shape[rank - 1];
+  final batch = x.length ~/ (n * n);
+  final out = Float32List(batch);
+  final a = Float64List(n * n);
+  for (int b = 0; b < batch; b++) {
+    for (int k = 0; k < n * n; k++) {
+      a[k] = x.getD(b * n * n + k);
+    }
+    var det = 1.0;
+    for (int i = 0; i < n; i++) {
+      var pivot = i;
+      for (int r = i + 1; r < n; r++) {
+        if (a[r * n + i].abs() > a[pivot * n + i].abs()) pivot = r;
+      }
+      if (a[pivot * n + i] == 0) {
+        det = 0;
+        break;
+      }
+      if (pivot != i) {
+        for (int c = 0; c < n; c++) {
+          final tmp = a[i * n + c];
+          a[i * n + c] = a[pivot * n + c];
+          a[pivot * n + c] = tmp;
+        }
+        det = -det;
+      }
+      final p = a[i * n + i];
+      det *= p;
+      for (int r = i + 1; r < n; r++) {
+        final f = a[r * n + i] / p;
+        for (int c = i + 1; c < n; c++) {
+          a[r * n + c] -= f * a[i * n + c];
+        }
+      }
+    }
+    out[b] = det;
+  }
+  return Tensor.float(out, x.shape.sublist(0, rank - 2));
+}
+
 Tensor opTrilu(Tensor x, {bool upper = true, int k = 0}) {
   final rank = x.rank;
   final rows = x.shape[rank - 2], cols = x.shape[rank - 1];
@@ -2504,8 +3043,11 @@ Tensor opScatterND(Tensor data, Tensor indices, Tensor updates) {
       if (v < 0) v += data.shape[d];
       off += v * strides[d];
     }
-    out.setRange(off, off + blockLen,
-        Int64List.sublistView(ui, t * blockLen, (t + 1) * blockLen));
+    out.setRange(
+      off,
+      off + blockLen,
+      Int64List.sublistView(ui, t * blockLen, (t + 1) * blockLen),
+    );
   }
   return Tensor.int64(out, data.shape);
 }
@@ -2541,6 +3083,394 @@ Tensor opTile(Tensor x, List<int> repeats) {
       : Tensor.int64(outI!, outShape);
 }
 
+Tensor opCastLike(Tensor x, Tensor like) {
+  switch (like.dtype) {
+    case DType.float32:
+      return opCast(x, 1);
+    case DType.int64:
+      return opCast(x, 7);
+    case DType.uint8:
+      return Tensor.uint8(
+        Uint8List.fromList([
+          for (int k = 0; k < x.length; k++) x.getD(k).round().clamp(0, 255),
+        ]),
+        x.shape,
+      );
+    case DType.int8:
+      return Tensor.int8(
+        Int8List.fromList([
+          for (int k = 0; k < x.length; k++) x.getD(k).round().clamp(-128, 127),
+        ]),
+        x.shape,
+      );
+  }
+}
+
+Tensor opEyeLike(Tensor x, {int k = 0, int? dtype}) {
+  if (x.rank != 2) {
+    throw ArgumentError('EyeLike requires a rank-2 input, got ${x.shape}');
+  }
+  final rows = x.shape[0], cols = x.shape[1];
+  final type = dtype;
+  if (type == 1 || (type == null && x.isFloat)) {
+    final out = Float32List(rows * cols);
+    for (int i = 0; i < rows; i++) {
+      final j = i + k;
+      if (j >= 0 && j < cols) out[i * cols + j] = 1;
+    }
+    return Tensor.float(out, x.shape);
+  }
+  if (type == 2) {
+    final out = Uint8List(rows * cols);
+    for (int i = 0; i < rows; i++) {
+      final j = i + k;
+      if (j >= 0 && j < cols) out[i * cols + j] = 1;
+    }
+    return Tensor.uint8(out, x.shape);
+  }
+  if (type == 3) {
+    final out = Int8List(rows * cols);
+    for (int i = 0; i < rows; i++) {
+      final j = i + k;
+      if (j >= 0 && j < cols) out[i * cols + j] = 1;
+    }
+    return Tensor.int8(out, x.shape);
+  }
+  final out = Int64List(rows * cols);
+  for (int i = 0; i < rows; i++) {
+    final j = i + k;
+    if (j >= 0 && j < cols) out[i * cols + j] = 1;
+  }
+  return Tensor.int64(out, x.shape);
+}
+
+Tensor opCompress(Tensor x, Tensor condition, {int? axis}) {
+  final selected = <int>[];
+  for (int i = 0; i < condition.length; i++) {
+    if (condition.getI(i) != 0) selected.add(i);
+  }
+  if (axis == null) {
+    final n = selected.length;
+    if (x.isFloat) {
+      final out = Float32List(n);
+      for (int i = 0; i < n; i++) {
+        out[i] = x.f![selected[i]];
+      }
+      return Tensor.float(out, [n]);
+    }
+    final out = Int64List(n);
+    for (int i = 0; i < n; i++) {
+      out[i] = x.intData[selected[i]];
+    }
+    return Tensor.int64(out, [n]);
+  }
+  final rank = x.rank;
+  final ax = axis < 0 ? axis + rank : axis;
+  if (condition.length != x.shape[ax]) {
+    throw ArgumentError(
+      'Compress condition length ${condition.length} != axis dim ${x.shape[ax]}',
+    );
+  }
+  final outShape = List<int>.from(x.shape)..[ax] = selected.length;
+  final outer = x.shape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
+  final inner = x.shape.sublist(ax + 1).fold<int>(1, (a, b) => a * b);
+  final n = outShape.fold<int>(1, (a, b) => a * b);
+  if (x.isFloat) {
+    final out = Float32List(n);
+    for (int o = 0; o < outer; o++) {
+      for (int j = 0; j < selected.length; j++) {
+        final src = (o * x.shape[ax] + selected[j]) * inner;
+        final dst = (o * selected.length + j) * inner;
+        out.setRange(dst, dst + inner, x.f!, src);
+      }
+    }
+    return Tensor.float(out, outShape);
+  }
+  final out = Int64List(n);
+  for (int o = 0; o < outer; o++) {
+    for (int j = 0; j < selected.length; j++) {
+      final src = (o * x.shape[ax] + selected[j]) * inner;
+      final dst = (o * selected.length + j) * inner;
+      out.setRange(dst, dst + inner, x.intData, src);
+    }
+  }
+  return Tensor.int64(out, outShape);
+}
+
+Tensor opReverseSequence(
+  Tensor x,
+  Tensor sequenceLens,
+  int timeAxis,
+  int batchAxis,
+) {
+  final rank = x.rank;
+  final tAx = timeAxis < 0 ? timeAxis + rank : timeAxis;
+  final bAx = batchAxis < 0 ? batchAxis + rank : batchAxis;
+  final List<num> out = x.isFloat
+      ? Float32List.fromList(x.f!)
+      : Int64List.fromList(x.intData);
+  final strides = x.strides;
+  final batchCount = x.shape[bAx];
+  final timeCount = x.shape[tAx];
+  final otherShape = <int>[
+    for (int a = 0; a < rank; a++)
+      if (a != tAx && a != bAx) x.shape[a],
+  ];
+  final otherCoords = List<int>.filled(otherShape.length, 0);
+  final otherAxes = [
+    for (int a = 0; a < rank; a++)
+      if (a != tAx && a != bAx) a,
+  ];
+  for (int b = 0; b < batchCount; b++) {
+    final len = sequenceLens.getI(b);
+    final limit = len < timeCount ? len : timeCount;
+    for (int j = 0; j < otherShape.length; j++) {
+      otherCoords[j] = 0;
+    }
+    while (true) {
+      for (int t = 0; t < limit ~/ 2; t++) {
+        final coords = List<int>.filled(rank, 0);
+        coords[bAx] = b;
+        coords[tAx] = t;
+        for (int j = 0; j < otherShape.length; j++) {
+          coords[otherAxes[j]] = otherCoords[j];
+        }
+        final a = _flatIndex(coords, strides);
+        coords[tAx] = limit - 1 - t;
+        final c = _flatIndex(coords, strides);
+        final tmp = out[a];
+        out[a] = out[c];
+        out[c] = tmp;
+      }
+      var advanced = false;
+      for (int j = otherShape.length - 1; j >= 0; j--) {
+        if (++otherCoords[j] < otherShape[j]) {
+          advanced = true;
+          break;
+        }
+        otherCoords[j] = 0;
+      }
+      if (!advanced) break;
+    }
+  }
+  return x.isFloat
+      ? Tensor.float(out as Float32List, x.shape)
+      : Tensor.int64(out as Int64List, x.shape);
+}
+
+int _flatIndex(List<int> coords, List<int> strides) {
+  var flat = 0;
+  for (int i = 0; i < coords.length; i++) {
+    flat += coords[i] * strides[i];
+  }
+  return flat;
+}
+
+List<int> _stridesOf(List<int> shape) {
+  final s = List<int>.filled(shape.length, 1);
+  for (var i = shape.length - 2; i >= 0; i--) {
+    s[i] = s[i + 1] * shape[i + 1];
+  }
+  return s;
+}
+
+Tensor opDepthToSpace(Tensor x, int blockSize, String mode) {
+  if (x.rank != 4) {
+    throw ArgumentError('DepthToSpace requires rank 4, got ${x.shape}');
+  }
+  final n = x.shape[0], c = x.shape[1], h = x.shape[2], w = x.shape[3];
+  final b = blockSize;
+  if (c % (b * b) != 0) {
+    throw ArgumentError('DepthToSpace channels $c not divisible by $b^2');
+  }
+  final co = c ~/ (b * b);
+  if (mode == 'CRD') {
+    final r = x.reshape([n, co, b, b, h, w]);
+    final t = opTranspose(r, [0, 1, 4, 2, 5, 3]);
+    return t.reshape([n, co, h * b, w * b]);
+  }
+  final r = x.reshape([n, b, b, co, h, w]);
+  final t = opTranspose(r, [0, 3, 4, 1, 5, 2]);
+  return t.reshape([n, co, h * b, w * b]);
+}
+
+Tensor opSpaceToDepth(Tensor x, int blockSize) {
+  if (x.rank != 4) {
+    throw ArgumentError('SpaceToDepth requires rank 4, got ${x.shape}');
+  }
+  final n = x.shape[0], c = x.shape[1], h = x.shape[2], w = x.shape[3];
+  final b = blockSize;
+  if (h % b != 0 || w % b != 0) {
+    throw ArgumentError(
+      'SpaceToDepth spatial dims ${x.shape.sublist(2)} '
+      'not divisible by $b',
+    );
+  }
+  final hb = h ~/ b, wb = w ~/ b;
+  final r = x.reshape([n, c, hb, b, wb, b]);
+  final t = opTranspose(r, [0, 3, 5, 1, 2, 4]);
+  return t.reshape([n, c * b * b, hb, wb]);
+}
+
+Tensor opScatterElements(
+  Tensor data,
+  Tensor indices,
+  Tensor updates,
+  int axis,
+  String reduction,
+) {
+  final rank = data.rank;
+  final ax = axis < 0 ? axis + rank : axis;
+  final List<num> out = data.isFloat
+      ? Float32List.fromList(data.f!)
+      : Int64List.fromList(data.intData);
+  final strides = data.strides;
+  for (int idx = 0; idx < indices.length; idx++) {
+    final c = _unflatten(idx, indices.shape);
+    var j = indices.getI(idx);
+    if (j < 0) j += data.shape[ax];
+    c[ax] = j;
+    final off = _flatIndex(c, strides);
+    final u = updates.getD(idx);
+    if (data.isFloat) {
+      switch (reduction) {
+        case 'add':
+          out[off] = out[off] + u;
+        case 'mul':
+          out[off] = out[off] * u;
+        case 'min':
+          out[off] = math.min(out[off], u);
+        case 'max':
+          out[off] = math.max(out[off], u);
+        default:
+          out[off] = u;
+      }
+    } else {
+      final ui = updates.getI(idx);
+      switch (reduction) {
+        case 'add':
+          out[off] = out[off] + ui;
+        case 'mul':
+          out[off] = out[off] * ui;
+        case 'min':
+          out[off] = math.min(out[off], ui);
+        case 'max':
+          out[off] = math.max(out[off], ui);
+        default:
+          out[off] = ui;
+      }
+    }
+  }
+  return data.isFloat
+      ? Tensor.float(out as Float32List, data.shape)
+      : Tensor.int64(out as Int64List, data.shape);
+}
+
+List<Tensor> opUnique(Tensor x, {int? axis, bool sorted = true}) {
+  final rank = x.rank;
+  final ax = axis == null ? null : (axis < 0 ? axis + rank : axis);
+  final outer = ax == null
+      ? 1
+      : x.shape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
+  final dim = ax == null ? x.length : x.shape[ax];
+  final inner = ax == null
+      ? 1
+      : x.shape.sublist(ax + 1).fold<int>(1, (a, b) => a * b);
+
+  List<dynamic> keyOf(int j) {
+    if (ax == null) return [x.isFloat ? x.getD(j) : x.getI(j)];
+    return [
+      for (int o = 0; o < outer; o++)
+        for (int i = 0; i < inner; i++)
+          x.isFloat
+              ? x.getD((o * dim + j) * inner + i)
+              : x.getI((o * dim + j) * inner + i),
+    ];
+  }
+
+  bool same(List<dynamic> a, List<dynamic> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  int cmp(List<dynamic> a, List<dynamic> b) {
+    for (int i = 0; i < a.length; i++) {
+      final c = (a[i] as num).compareTo(b[i] as num);
+      if (c != 0) return c;
+    }
+    return 0;
+  }
+
+  final uniqueKeys = <List<dynamic>>[];
+  final first = <int>[];
+  final counts = <int>[];
+  final inverse = List<int>.filled(dim, 0);
+  for (int j = 0; j < dim; j++) {
+    final key = keyOf(j);
+    var found = -1;
+    for (int u = 0; u < uniqueKeys.length; u++) {
+      if (same(uniqueKeys[u], key)) {
+        found = u;
+        break;
+      }
+    }
+    if (found < 0) {
+      found = uniqueKeys.length;
+      uniqueKeys.add(key);
+      first.add(j);
+      counts.add(1);
+    } else {
+      counts[found]++;
+    }
+    inverse[j] = found;
+  }
+
+  var order = List<int>.generate(uniqueKeys.length, (i) => i);
+  if (sorted) {
+    order.sort((a, b) => cmp(uniqueKeys[a], uniqueKeys[b]));
+  }
+  final remap = List<int>.filled(order.length, 0);
+  for (int i = 0; i < order.length; i++) {
+    remap[order[i]] = i;
+  }
+  final List<num> y = x.isFloat
+      ? Float32List(order.length * outer * inner)
+      : Int64List(order.length * outer * inner);
+  for (int u = 0; u < order.length; u++) {
+    final srcJ = first[order[u]];
+    for (int o = 0; o < outer; o++) {
+      for (int i = 0; i < inner; i++) {
+        final src = (o * dim + srcJ) * inner + i;
+        final dst = (o * order.length + u) * inner + i;
+        if (x.isFloat) {
+          y[dst] = x.f![src];
+        } else {
+          y[dst] = x.intData[src];
+        }
+      }
+    }
+  }
+  final yShape = ax == null
+      ? [order.length]
+      : (List<int>.from(x.shape)..[ax] = order.length);
+  final indicesOut = Int64List.fromList([for (final u in order) first[u]]);
+  final inverseOut = Int64List.fromList([
+    for (int j = 0; j < dim; j++) remap[inverse[j]],
+  ]);
+  final countsOut = Int64List.fromList([for (final u in order) counts[u]]);
+  return [
+    x.isFloat
+        ? Tensor.float(y as Float32List, yShape)
+        : Tensor.int64(y as Int64List, yShape),
+    Tensor.int64(indicesOut, [order.length]),
+    Tensor.int64(inverseOut, [dim]),
+    Tensor.int64(countsOut, [order.length]),
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Quantization (QDQ format)
 // ---------------------------------------------------------------------------
@@ -2570,8 +3500,14 @@ int _channelOf(int k, List<int> shape, int axis) {
 /// per-tensor or per-axis. [lo]/[hi] are the saturation bounds of the output
 /// type (from the zero-point tensor's dtype: uint8 → 0..255, int8 →
 /// -128..127).
-Tensor opQuantizeLinear(Tensor x, Tensor scale, Tensor? zeroPoint,
-    {int axis = 1, required int lo, required int hi}) {
+Tensor opQuantizeLinear(
+  Tensor x,
+  Tensor scale,
+  Tensor? zeroPoint, {
+  int axis = 1,
+  required int lo,
+  required int hi,
+}) {
   final n = x.length;
   // Compact output: int8 when the range is signed, uint8 otherwise.
   final signed = lo < 0;
@@ -2595,8 +3531,12 @@ Tensor opQuantizeLinear(Tensor x, Tensor scale, Tensor? zeroPoint,
 }
 
 /// `DequantizeLinear`: `y = (x - zeroPoint) * scale`, per-tensor or per-axis.
-Tensor opDequantizeLinear(Tensor x, Tensor scale, Tensor? zeroPoint,
-    {int axis = 1}) {
+Tensor opDequantizeLinear(
+  Tensor x,
+  Tensor scale,
+  Tensor? zeroPoint, {
+  int axis = 1,
+}) {
   final n = x.length;
   final out = Float32List(n);
   final perAxis = scale.length > 1;
@@ -2668,7 +3608,7 @@ Tensor opPad(
     }
   }
   final outShape = [
-    for (int a = 0; a < rank; a++) x.shape[a] + beg[a] + end[a]
+    for (int a = 0; a < rank; a++) x.shape[a] + beg[a] + end[a],
   ];
   final n = outShape.fold<int>(1, (a, b) => a * b);
   final srcStrides = x.strides;
@@ -2682,7 +3622,7 @@ Tensor opPad(
   // reflect paddings on 1024² activations.
   final maps = [
     for (int a = 0; a < rank; a++)
-      _padIndexMap(x.shape[a], beg[a], end[a], mode)
+      _padIndexMap(x.shape[a], beg[a], end[a], mode),
   ];
   final last = rank - 1;
   final inner = x.shape[last];
@@ -2760,7 +3700,10 @@ List<int> _padIndexMap(int dim, int before, int after, String mode) {
     // ONNX requires reflect pad < input dim; without this the mirror loop
     // below never converges for a singleton axis.
     throw ArgumentError.value(
-        dim, 'dim', 'reflect padding requires an axis longer than 1');
+      dim,
+      'dim',
+      'reflect padding requires an axis longer than 1',
+    );
   }
   for (int j = 0; j < len; j++) {
     int i = j - before;
@@ -2820,14 +3763,32 @@ Tensor opReduceSum(Tensor x, List<int>? axes, bool keepdims) {
       .map((a) => a < 0 ? a + rank : a)
       .toSet();
   final outShapeFull = [
-    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k]
+    for (int k = 0; k < rank; k++) ax.contains(k) ? 1 : x.shape[k],
   ];
   final n = outShapeFull.fold<int>(1, (a, b) => a * b);
-  final sums = Float64List(n);
   final outStridesFull = Tensor.filledFloat(outShapeFull, 0).strides;
+  final shape = keepdims
+      ? outShapeFull
+      : [
+          for (int k = 0; k < rank; k++)
+            if (!ax.contains(k)) x.shape[k],
+        ];
+  if (!x.isFloat) {
+    final sums = Int64List(n);
+    for (int idx = 0; idx < x.length; idx++) {
+      final coords = _unflatten(idx, x.shape);
+      var outFlat = 0;
+      for (int k = 0; k < rank; k++) {
+        outFlat += (ax.contains(k) ? 0 : coords[k]) * outStridesFull[k];
+      }
+      sums[outFlat] += x.getI(idx);
+    }
+    return Tensor.int64(sums, shape);
+  }
+  final sums = Float64List(n);
   for (int idx = 0; idx < x.length; idx++) {
     final coords = _unflatten(idx, x.shape);
-    int outFlat = 0;
+    var outFlat = 0;
     for (int k = 0; k < rank; k++) {
       outFlat += (ax.contains(k) ? 0 : coords[k]) * outStridesFull[k];
     }
@@ -2837,11 +3798,40 @@ Tensor opReduceSum(Tensor x, List<int>? axes, bool keepdims) {
   for (int k = 0; k < n; k++) {
     out[k] = sums[k];
   }
-  if (keepdims) return Tensor.float(out, outShapeFull);
-  return Tensor.float(out, [
-    for (int k = 0; k < rank; k++)
-      if (!ax.contains(k)) x.shape[k]
-  ]);
+  return Tensor.float(out, shape);
+}
+
+Tensor opReduceL1(Tensor x, List<int>? axes, bool keepdims) =>
+    opReduceSum(opAbs(x), axes, keepdims);
+
+Tensor opReduceLogSum(Tensor x, List<int>? axes, bool keepdims) {
+  final sum = opReduceSum(x, axes, keepdims);
+  final out = Float32List(sum.length);
+  final sf = sum.asFloatList();
+  for (int k = 0; k < out.length; k++) {
+    out[k] = math.log(sf[k]);
+  }
+  return Tensor.float(out, sum.shape);
+}
+
+Tensor opReduceLogSumExp(Tensor x, List<int>? axes, bool keepdims) {
+  final max = opReduceMinMax(x, axes, true, isMax: true);
+  final centered = opSub(x, max);
+  final exp = opExp(centered);
+  final sum = opReduceSum(exp, axes, true);
+  final out = Float32List(sum.length);
+  final sf = sum.asFloatList();
+  final mf = max.asFloatList();
+  for (int k = 0; k < out.length; k++) {
+    out[k] = math.log(sf[k]) + mf[k];
+  }
+  var result = Tensor.float(out, sum.shape);
+  if (!keepdims) {
+    final rank = x.shape.length;
+    final reduced = axes ?? List<int>.generate(rank, (k) => k);
+    result = opSqueeze(result, reduced);
+  }
+  return result;
 }
 
 /// `GatherElements` — output has the shape of [indices]; each element picks
@@ -2877,8 +3867,12 @@ Tensor opGatherElements(Tensor data, Tensor indices, int axis) {
 /// `CumSum` along [axis] (inclusive, forward by default; [exclusive] shifts the
 /// sum, [reverse] accumulates from the end) — used e.g. to derive position ids
 /// from an attention mask.
-Tensor opCumSum(Tensor x, int axis,
-    {bool exclusive = false, bool reverse = false}) {
+Tensor opCumSum(
+  Tensor x,
+  int axis, {
+  bool exclusive = false,
+  bool reverse = false,
+}) {
   final rank = x.shape.length;
   final ax = axis < 0 ? axis + rank : axis;
   final axisStride = x.strides[ax];
@@ -2922,6 +3916,51 @@ Tensor opCumSum(Tensor x, int axis,
   return isFloat ? Tensor.float(outF!, x.shape) : Tensor.int64(outI!, x.shape);
 }
 
+Tensor opCumProd(
+  Tensor x,
+  int axis, {
+  bool exclusive = false,
+  bool reverse = false,
+}) {
+  final rank = x.shape.length;
+  final ax = axis < 0 ? axis + rank : axis;
+  final axisStride = x.strides[ax];
+  final axisSize = x.shape[ax];
+  final n = x.length;
+  final isFloat = x.isFloat;
+  final outF = isFloat ? Float32List(n) : null;
+  final outI = isFloat ? null : Int64List(n);
+  final f32 = Float32List(1);
+  for (int i = 0; i < n; i++) {
+    if ((i ~/ axisStride) % axisSize != 0) continue;
+    var accF = 1.0;
+    var accI = 1;
+    for (int s = 0; s < axisSize; s++) {
+      final k = reverse ? axisSize - 1 - s : s;
+      final idx = i + k * axisStride;
+      final v = x.getD(idx);
+      if (exclusive) {
+        if (isFloat) {
+          outF![idx] = accF;
+        } else {
+          outI![idx] = accI;
+        }
+      }
+      f32[0] = accF * v;
+      accF = f32[0];
+      accI *= v.round();
+      if (!exclusive) {
+        if (isFloat) {
+          outF![idx] = accF;
+        } else {
+          outI![idx] = accI;
+        }
+      }
+    }
+  }
+  return isFloat ? Tensor.float(outF!, x.shape) : Tensor.int64(outI!, x.shape);
+}
+
 /// OneHot: inserts a depth-sized axis into an integer index tensor. Nullable
 /// positions are not special-cased — ORT and the ONNX reference implementation
 /// both fold every index through `mod(indices, depth)`.
@@ -2938,12 +3977,11 @@ Tensor opOneHot(Tensor indices, Tensor depth, Tensor values, int axis) {
     throw ArgumentError('OneHot: values must have exactly two elements');
   }
   final off = values.getD(0), on = values.getD(1);
-  final mid =
-      indices.shape.sublist(ax).fold(1, (int a, int b) => a * b);
+  final mid = indices.shape.sublist(ax).fold(1, (int a, int b) => a * b);
   final shape = [
     ...indices.shape.sublist(0, ax),
     d,
-    ...indices.shape.sublist(ax)
+    ...indices.shape.sublist(ax),
   ];
   final isFloat = values.isFloat;
   final outF = isFloat ? Float32List(indices.length * d) : null;
@@ -2961,7 +3999,1315 @@ Tensor opOneHot(Tensor indices, Tensor depth, Tensor values, int axis) {
       }
     }
   }
-  return isFloat
-      ? Tensor.float(outF!, shape)
-      : Tensor.int64(outI!, shape);
+  return isFloat ? Tensor.float(outF!, shape) : Tensor.int64(outI!, shape);
 }
+
+List<num> _copyTensorData(Tensor x) => switch (x.dtype) {
+  DType.float32 => Float32List.fromList(x.f!),
+  DType.int64 => Int64List.fromList(x.i!),
+  DType.uint8 => Uint8List.fromList(x.u8!),
+  DType.int8 => Int8List.fromList(x.i8!),
+};
+
+Tensor _tensorFromData(List<num> data, List<int> shape, DType dtype) =>
+    switch (dtype) {
+      DType.float32 => Tensor.float(
+        Float32List.fromList(data.map((v) => v.toDouble()).toList()),
+        shape,
+      ),
+      DType.int64 => Tensor.int64(
+        Int64List.fromList(data.map((v) => v.toInt()).toList()),
+        shape,
+      ),
+      DType.uint8 => Tensor.uint8(
+        Uint8List.fromList(data.map((v) => v.toInt()).toList()),
+        shape,
+      ),
+      DType.int8 => Tensor.int8(
+        Int8List.fromList(data.map((v) => v.toInt()).toList()),
+        shape,
+      ),
+    };
+
+Tensor opCenterCropPad(Tensor x, Tensor shapeInput, List<int>? axes) {
+  final targetDims = shapeInput.asIntList();
+  final ax = axes ?? List<int>.generate(targetDims.length, (i) => i);
+  if (ax.length != targetDims.length) {
+    throw ArgumentError('CenterCropPad: axes and shape length differ');
+  }
+  if (targetDims.any((d) => d < 0)) {
+    throw ArgumentError('CenterCropPad: target dimensions must be nonnegative');
+  }
+  final normalized = [for (final a in ax) a < 0 ? a + x.rank : a];
+  final outShape = List<int>.from(x.shape);
+  for (var i = 0; i < normalized.length; i++) {
+    final a = normalized[i];
+    if (a < 0 || a >= x.rank) {
+      throw ArgumentError('CenterCropPad: axis $a is out of range');
+    }
+    outShape[a] = targetDims[i];
+  }
+  final outLen = outShape.fold<int>(1, (a, b) => a * b);
+  final out = List<num>.filled(outLen, 0);
+  final outStrides = _stridesOf(outShape);
+  for (var idx = 0; idx < x.length; idx++) {
+    if ((idx & 4095) == 0) activeOnnxControl?.checkpoint();
+    final coords = _unflatten(idx, x.shape);
+    var skip = false;
+    for (var i = 0; i < normalized.length; i++) {
+      final a = normalized[i], target = targetDims[i], source = x.shape[a];
+      if (target >= source) {
+        coords[a] += (target - source) ~/ 2;
+      } else {
+        coords[a] -= (source - target) ~/ 2;
+        if (coords[a] < 0 || coords[a] >= target) {
+          skip = true;
+          break;
+        }
+      }
+    }
+    if (skip) continue;
+    out[_flatIndex(coords, outStrides)] = x.isFloat ? x.getD(idx) : x.getI(idx);
+  }
+  return _tensorFromData(out, outShape, x.dtype);
+}
+
+Tensor opCol2Im(
+  Tensor x,
+  Tensor imageShapeInput,
+  Tensor blockShapeInput, {
+  List<int>? strides,
+  List<int>? dilations,
+  List<int>? pads,
+}) {
+  final imageShape = imageShapeInput.asIntList();
+  final blockShape = blockShapeInput.asIntList();
+  final rank = imageShape.length;
+  if (rank == 0 || blockShape.length != rank) {
+    throw ArgumentError('Col2Im: image and block ranks must match');
+  }
+  final stride = strides ?? List<int>.filled(rank, 1);
+  final dilation = dilations ?? List<int>.filled(rank, 1);
+  final pad = pads ?? List<int>.filled(rank * 2, 0);
+  if (stride.length != rank ||
+      dilation.length != rank ||
+      pad.length != rank * 2) {
+    throw ArgumentError('Col2Im: attribute rank mismatch');
+  }
+  final blockProd = blockShape.fold<int>(1, (a, b) => a * b);
+  final imageProd = imageShape.fold<int>(1, (a, b) => a * b);
+  final grid = <int>[
+    for (var d = 0; d < rank; d++)
+      (imageShape[d] +
+                  pad[d] +
+                  pad[d + rank] -
+                  dilation[d] * (blockShape[d] - 1) -
+                  1) ~/
+              stride[d] +
+          1,
+  ];
+  final gridProd = grid.fold<int>(1, (a, b) => a * b);
+  if (x.rank != 3 || x.shape[2] != gridProd) {
+    throw ArgumentError('Col2Im: input shape ${x.shape} does not match grid');
+  }
+  final n = x.shape[0];
+  final channels = x.shape[1] ~/ blockProd;
+  if (channels * blockProd != x.shape[1]) {
+    throw ArgumentError('Col2Im: channels are not divisible by block size');
+  }
+  final outLen = n * channels * imageProd;
+  final out = List<num>.filled(outLen, 0);
+  final imageStrides = _stridesOf(imageShape);
+  for (var ni = 0; ni < n; ni++) {
+    for (var c = 0; c < channels; c++) {
+      for (var block = 0; block < gridProd; block++) {
+        final blockCoords = _unflatten(block, grid);
+        for (var k = 0; k < blockProd; k++) {
+          final kernelCoords = _unflatten(k, blockShape);
+          var inside = true;
+          for (var d = 0; d < rank; d++) {
+            kernelCoords[d] =
+                blockCoords[d] * stride[d] -
+                pad[d] +
+                kernelCoords[d] * dilation[d];
+            if (kernelCoords[d] < 0 || kernelCoords[d] >= imageShape[d]) {
+              inside = false;
+              break;
+            }
+          }
+          if (!inside) continue;
+          final src = ((ni * channels + c) * blockProd + k) * gridProd + block;
+          final dst =
+              (ni * channels + c) * imageProd +
+              _flatIndex(kernelCoords, imageStrides);
+          out[dst] = out[dst] + (x.isFloat ? x.getD(src) : x.getI(src));
+        }
+      }
+    }
+  }
+  return _tensorFromData(out, [n, channels, ...imageShape], x.dtype);
+}
+
+Tensor opMaxUnpool(
+  Tensor x,
+  Tensor indices,
+  List<int> kernelShape, {
+  List<int>? strides,
+  List<int>? pads,
+  Tensor? outputShape,
+}) {
+  final rank = x.rank;
+  final spatialRank = rank - 2;
+  final kernel = kernelShape;
+  final stride = strides ?? kernel;
+  final pad = pads ?? List<int>.filled(spatialRank * 2, 0);
+  if (kernel.length != spatialRank ||
+      stride.length != spatialRank ||
+      pad.length != spatialRank * 2) {
+    throw ArgumentError('MaxUnpool: attribute rank mismatch');
+  }
+  List<int> outShape;
+  if (outputShape != null) {
+    final requested = outputShape.asIntList();
+    outShape = requested.length == rank
+        ? requested
+        : [x.shape[0], x.shape[1], ...requested];
+  } else {
+    outShape = [
+      x.shape[0],
+      x.shape[1],
+      for (var d = 0; d < spatialRank; d++)
+        (x.shape[d + 2] - 1) * stride[d] +
+            kernel[d] -
+            pad[d] -
+            pad[d + spatialRank],
+    ];
+  }
+  final out = List<num>.filled(outShape.fold<int>(1, (a, b) => a * b), 0);
+  final perBatch = x.length ~/ (x.shape[0] * x.shape[1]);
+  final outSpatial = outShape.sublist(2).fold<int>(1, (a, b) => a * b);
+  for (var idx = 0; idx < x.length; idx++) {
+    final n = idx ~/ (x.shape[1] * perBatch);
+    final c = (idx ~/ perBatch) % x.shape[1];
+    final target = indices.getI(idx);
+    if (target < 0 || target >= outSpatial) {
+      throw ArgumentError('MaxUnpool: index $target is out of range');
+    }
+    out[(n * x.shape[1] + c) * outSpatial + target] = x.getD(idx);
+  }
+  return _tensorFromData(out, outShape, x.dtype);
+}
+
+Tensor opMaxRoiPool(
+  Tensor x,
+  Tensor rois,
+  List<int> pooledShape, {
+  double spatialScale = 1.0,
+}) {
+  if (x.rank != 4 || pooledShape.length != 2) {
+    throw ArgumentError('MaxRoiPool: expected NCHW input and 2-D pooled shape');
+  }
+  final n = x.shape[0], c = x.shape[1], h = x.shape[2], w = x.shape[3];
+  final numRois = rois.shape[0];
+  final ph = pooledShape[0], pw = pooledShape[1];
+  final out = List<num>.filled(numRois * c * ph * pw, 0);
+  for (var r = 0; r < numRois; r++) {
+    final batch = rois.getD(r * 5).round();
+    if (batch < 0 || batch >= n) {
+      throw ArgumentError('MaxRoiPool: batch index $batch is out of range');
+    }
+    final startW = (rois.getD(r * 5 + 1) * spatialScale).round();
+    final startH = (rois.getD(r * 5 + 2) * spatialScale).round();
+    final endW = (rois.getD(r * 5 + 3) * spatialScale).round();
+    final endH = (rois.getD(r * 5 + 4) * spatialScale).round();
+    final roiW = math.max(endW - startW + 1, 1);
+    final roiH = math.max(endH - startH + 1, 1);
+    for (var ch = 0; ch < c; ch++) {
+      for (var py = 0; py < ph; py++) {
+        final hStart = startH + (py * roiH ~/ ph);
+        final hEnd = math.min(startH + ((py + 1) * roiH ~/ ph), h);
+        for (var px = 0; px < pw; px++) {
+          final wStart = startW + (px * roiW ~/ pw);
+          final wEnd = math.min(startW + ((px + 1) * roiW ~/ pw), w);
+          var best = double.negativeInfinity;
+          for (var y = math.max(hStart, 0); y < hEnd; y++) {
+            for (var xx = math.max(wStart, 0); xx < wEnd; xx++) {
+              final v = x.getD(((batch * c + ch) * h + y) * w + xx);
+              if (v > best) best = v;
+            }
+          }
+          out[((r * c + ch) * ph + py) * pw + px] =
+              best == double.negativeInfinity ? 0.0 : best;
+        }
+      }
+    }
+  }
+  return Tensor.float(Float32List.fromList(out.cast<double>()), [
+    numRois,
+    c,
+    ph,
+    pw,
+  ]);
+}
+
+Tensor opMelWeightMatrix(
+  Tensor numMelBins,
+  Tensor dftLength,
+  Tensor sampleRate,
+  Tensor lowerEdge,
+  Tensor upperEdge, {
+  int outputDataType = 1,
+}) {
+  final bins = numMelBins.getI(0);
+  final dft = dftLength.getI(0);
+  final rate = sampleRate.getI(0);
+  final low = lowerEdge.getD(0);
+  final high = upperEdge.getD(0);
+  final specBins = dft ~/ 2 + 1;
+  final melLow = 2595 * math.log(1 + low / 700) / math.ln10;
+  final melHigh = 2595 * math.log(1 + high / 700) / math.ln10;
+  final step = (melHigh - melLow) / (bins + 2);
+  final edges = <int>[
+    for (var i = 0; i < bins + 2; i++)
+      (((dft + 1) * (700 * (math.pow(10, (melLow + i * step) / 2595) - 1))) ~/
+              rate)
+          .toInt(),
+  ];
+  final matrix = List<double>.filled(specBins * bins, 0);
+  for (var i = 0; i < bins; i++) {
+    final lower = edges[i], center = edges[i + 1], higher = edges[i + 2];
+    final lowToCenter = center - lower;
+    if (lowToCenter == 0) {
+      if (center >= 0 && center < specBins) {
+        matrix[center * bins + i] = 1;
+      }
+    } else {
+      for (var j = lower; j <= center; j++) {
+        if (j >= 0 && j < specBins) {
+          matrix[j * bins + i] = (j - lower) / lowToCenter;
+        }
+      }
+    }
+    final centerToHigh = higher - center;
+    if (centerToHigh > 0) {
+      for (var j = center; j < higher; j++) {
+        if (j >= 0 && j < specBins) {
+          matrix[j * bins + i] = (higher - j) / centerToHigh;
+        }
+      }
+    }
+  }
+  final shape = [specBins, bins];
+  if (outputDataType == 2) {
+    return Tensor.uint8(
+      Uint8List.fromList(matrix.map((v) => v.round()).toList()),
+      shape,
+    );
+  }
+  if (outputDataType == 3) {
+    return Tensor.int8(
+      Int8List.fromList(matrix.map((v) => v.round()).toList()),
+      shape,
+    );
+  }
+  if (outputDataType == 7) {
+    return Tensor.int64(
+      Int64List.fromList(matrix.map((v) => v.round()).toList()),
+      shape,
+    );
+  }
+  return Tensor.float(Float32List.fromList(matrix), shape);
+}
+
+Tensor opTensorScatter(
+  Tensor past,
+  Tensor update, {
+  Tensor? writeIndices,
+  int axis = -2,
+  String mode = 'linear',
+}) {
+  final ax = axis < 0 ? axis + past.rank : axis;
+  if (ax < 0 || ax >= past.rank) {
+    throw ArgumentError('TensorScatter: axis $axis is out of range');
+  }
+  if (update.rank != past.rank) {
+    throw ArgumentError('TensorScatter: cache and update ranks differ');
+  }
+  final out = _copyTensorData(past);
+  final prefixShape = [
+    for (var d = 0; d < past.rank; d++)
+      if (d != ax) past.shape[d],
+  ];
+  final prefixLen = prefixShape.fold<int>(1, (a, b) => a * b);
+  final pastStrides = past.strides;
+  final updateStrides = update.strides;
+  final maxSeq = past.shape[ax];
+  final updateSeq = update.shape[ax];
+  final prefixStrides = [
+    for (var d = 0; d < past.rank; d++)
+      if (d != ax) pastStrides[d],
+  ];
+  final updatePrefixStrides = [
+    for (var d = 0; d < past.rank; d++)
+      if (d != ax) updateStrides[d],
+  ];
+  for (var prefix = 0; prefix < prefixLen; prefix++) {
+    final prefixCoords = _unflatten(prefix, prefixShape);
+    final base = _flatIndex(prefixCoords, prefixStrides);
+    final updateBase = _flatIndex(prefixCoords, updatePrefixStrides);
+    final write = writeIndices == null
+        ? 0
+        : writeIndices.length == 1
+        ? writeIndices.getI(0)
+        : writeIndices.getI(prefixCoords.isEmpty ? 0 : prefixCoords[0]);
+    for (var s = 0; s < updateSeq; s++) {
+      var cacheSeq = write + s;
+      if (mode == 'circular') {
+        cacheSeq %= maxSeq;
+      } else if (cacheSeq < 0 || cacheSeq >= maxSeq) {
+        continue;
+      }
+      final src = updateBase + s * updateStrides[ax];
+      final dst = base + cacheSeq * pastStrides[ax];
+      out[dst] = past.isFloat ? update.getD(src) : update.getI(src);
+    }
+  }
+  return _tensorFromData(out, past.shape, past.dtype);
+}
+
+Tensor opAffineGrid(Tensor theta, Tensor size, {bool alignCorners = false}) {
+  if (theta.rank != 3 || size.rank != 1 || size.length < 4 || size.length > 5) {
+    throw ArgumentError(
+      'AffineGrid: expected theta NxMx(M+1) and a 4/5-element size vector',
+    );
+  }
+  final n = theta.shape[0];
+  final sizeValues = size.asIntList();
+  final dims = sizeValues.length - 2;
+  if ((dims == 2 && theta.shape[1] != 2) ||
+      (dims == 3 && theta.shape[1] != 3) ||
+      theta.shape[2] != theta.shape[1] + 1) {
+    throw ArgumentError(
+      'AffineGrid: theta shape ${theta.shape} does not match size',
+    );
+  }
+  final spatial = sizeValues.sublist(2);
+  final outShape = [n, ...spatial, dims];
+  final out = Float32List(n * spatial.fold<int>(1, (a, b) => a * b) * dims);
+  final coords = List<double>.filled(dims, 0);
+  for (var b = 0; b < n; b++) {
+    for (var flat = 0; flat < spatial.fold<int>(1, (a, b) => a * b); flat++) {
+      final pos = _unflatten(flat, spatial);
+      for (var d = 0; d < dims; d++) {
+        final sd = dims - 1 - d;
+        coords[d] = alignCorners
+            ? (spatial[sd] == 1 ? 0.0 : -1 + 2 * pos[sd] / (spatial[sd] - 1))
+            : -1 + (2 * pos[sd] + 1) / spatial[sd];
+      }
+      for (var r = 0; r < dims; r++) {
+        var v = theta.getD((b * dims + r) * (dims + 1) + dims);
+        for (var d = 0; d < dims; d++) {
+          v += theta.getD((b * dims + r) * (dims + 1) + d) * coords[d];
+        }
+        out[(b * spatial.fold<int>(1, (a, b) => a * b) + flat) * dims + r] = v;
+      }
+    }
+  }
+  return Tensor.float(out, outShape);
+}
+
+Tensor opDft(
+  Tensor input,
+  Tensor? dftLength,
+  Tensor? axisInput, {
+  bool onesided = false,
+  bool inverse = false,
+}) {
+  final rank = input.rank;
+  final complex = input.shape.last;
+  if (complex != 1 && complex != 2) {
+    throw ArgumentError('DFT: last dimension must be 1 or 2');
+  }
+  final signalShape = input.shape.sublist(0, rank - 1);
+  final axis = axisInput == null ? signalShape.length - 1 : axisInput.getI(0);
+  final ax = axis < 0 ? axis + signalShape.length : axis;
+  if (ax < 0 || ax >= signalShape.length) {
+    throw ArgumentError('DFT: axis $axis is out of range');
+  }
+  final readN = signalShape[ax];
+  final n = dftLength == null
+      ? (inverse && onesided ? 2 * (readN - 1) : readN)
+      : dftLength.getI(0);
+  if (n <= 0) throw ArgumentError('DFT: dft_length must be positive');
+  final outN = inverse ? (onesided ? n : n) : (onesided ? n ~/ 2 + 1 : n);
+  final outComplex = inverse && onesided ? 1 : 2;
+  final outShape = List<int>.from(signalShape)
+    ..[ax] = outN
+    ..add(outComplex);
+  final outer = signalShape.sublist(0, ax).fold<int>(1, (a, b) => a * b);
+  final inner = signalShape.sublist(ax + 1).fold<int>(1, (a, b) => a * b);
+  final out = Float32List(outer * outN * inner * outComplex);
+  final re = Float64List(readN);
+  final im = Float64List(readN);
+  for (var o = 0; o < outer; o++) {
+    for (var i = 0; i < inner; i++) {
+      for (var k = 0; k < readN; k++) {
+        final base = ((o * readN + k) * inner + i) * complex;
+        re[k] = input.getD(base);
+        im[k] = complex == 2 ? input.getD(base + 1) : 0;
+      }
+      for (var k = 0; k < outN; k++) {
+        var sr = 0.0, si = 0.0;
+        if (!inverse) {
+          for (var j = 0; j < n; j++) {
+            final jr = j < readN ? re[j] : 0.0;
+            final ji = j < readN ? im[j] : 0.0;
+            final angle = -2 * math.pi * k * j / n;
+            final c = math.cos(angle), s = math.sin(angle);
+            sr += jr * c - ji * s;
+            si += jr * s + ji * c;
+          }
+        } else if (!onesided) {
+          for (var j = 0; j < n; j++) {
+            final jr = j < readN ? re[j] : 0.0;
+            final ji = j < readN ? im[j] : 0.0;
+            final angle = 2 * math.pi * k * j / n;
+            final c = math.cos(angle), s = math.sin(angle);
+            sr += jr * c - ji * s;
+            si += jr * s + ji * c;
+          }
+          sr /= n;
+          si /= n;
+        } else {
+          for (var j = 0; j < n; j++) {
+            int idx;
+            bool conjugate;
+            if (j < readN) {
+              idx = j;
+              conjugate = false;
+            } else {
+              idx = n - j;
+              conjugate = true;
+            }
+            if (idx < 0 || idx >= readN) continue;
+            final jr = re[idx];
+            final ji = conjugate ? -im[idx] : im[idx];
+            final angle = 2 * math.pi * k * j / n;
+            final c = math.cos(angle), s = math.sin(angle);
+            sr += jr * c - ji * s;
+            si += jr * s + ji * c;
+          }
+          sr /= n;
+          si /= n;
+        }
+        final base = ((o * outN + k) * inner + i) * outComplex;
+        out[base] = sr;
+        if (outComplex == 2) out[base + 1] = si;
+      }
+    }
+  }
+  return Tensor.float(out, outShape);
+}
+
+double _sampleMultilinear(
+  Tensor x,
+  int batch,
+  int channel,
+  List<double> point,
+  List<int> spatial,
+) {
+  final rank = spatial.length;
+  var flatSpatial = 1;
+  for (final d in spatial) {
+    flatSpatial *= d;
+  }
+  final lo = List<int>.filled(rank, 0);
+  final weightLo = List<double>.filled(rank, 0);
+  final weightHi = List<double>.filled(rank, 0);
+  for (var d = 0; d < rank; d++) {
+    final v = point[d];
+    lo[d] = v.floor();
+    final frac = v - lo[d];
+    weightLo[d] = 1 - frac;
+    weightHi[d] = frac;
+  }
+  var acc = 0.0;
+  final corners = 1 << rank;
+  final coords = List<int>.filled(rank, 0);
+  for (var corner = 0; corner < corners; corner++) {
+    var weight = 1.0;
+    var valid = true;
+    for (var d = 0; d < rank; d++) {
+      final upper = (corner >> d) & 1;
+      final c = lo[d] + upper;
+      if (c < 0 || c >= spatial[d]) {
+        valid = false;
+        break;
+      }
+      coords[d] = c;
+      weight *= upper == 0 ? weightLo[d] : weightHi[d];
+    }
+    if (!valid || weight == 0) continue;
+    var offset = 0;
+    for (var d = 0; d < rank; d++) {
+      offset = offset * spatial[d] + coords[d];
+    }
+    acc +=
+        weight *
+        x.getD(((batch * x.shape[1] + channel) * flatSpatial) + offset);
+  }
+  return acc;
+}
+
+Tensor opDeformConv(
+  Tensor x,
+  Tensor weight,
+  Tensor offset, {
+  Tensor? bias,
+  Tensor? mask,
+  int group = 1,
+  int offsetGroup = 1,
+  List<int>? dilations,
+  List<int>? kernelShape,
+  List<int>? pads,
+  List<int>? strides,
+}) {
+  if (x.rank < 3 || weight.rank != x.rank) {
+    throw ArgumentError('DeformConv: expected matching N-D input and weight');
+  }
+  final rank = x.rank - 2;
+  final spatial = x.shape.sublist(2);
+  final kernel = kernelShape ?? weight.shape.sublist(2);
+  final stride = strides ?? List<int>.filled(rank, 1);
+  final dilation = dilations ?? List<int>.filled(rank, 1);
+  final pad = pads ?? List<int>.filled(rank * 2, 0);
+  if (kernel.length != rank ||
+      stride.length != rank ||
+      dilation.length != rank ||
+      pad.length != rank * 2) {
+    throw ArgumentError('DeformConv: attribute rank mismatch');
+  }
+  final outSpatial = offset.shape.sublist(2);
+  final n = x.shape[0];
+  final channels = x.shape[1];
+  final outChannels = weight.shape[0];
+  final icsPerGroup = weight.shape[1];
+  if (channels != icsPerGroup * group ||
+      outChannels % group != 0 ||
+      channels % offsetGroup != 0) {
+    throw ArgumentError('DeformConv: inconsistent channel grouping');
+  }
+  final ocsPerGroup = outChannels ~/ group;
+  final icsPerOffsetGroup = channels ~/ offsetGroup;
+  final outProd = outSpatial.fold<int>(1, (a, b) => a * b);
+  final kernelProd = kernel.fold<int>(1, (a, b) => a * b);
+  if (offset.shape[1] != offsetGroup * kernelProd * rank) {
+    throw ArgumentError('DeformConv: invalid offset channel count');
+  }
+  final out = List<double>.filled(n * outChannels * outProd, 0);
+  final point = List<double>.filled(rank, 0);
+  for (var batch = 0; batch < n; batch++) {
+    for (var oc = 0; oc < outChannels; oc++) {
+      final groupIndex = oc ~/ ocsPerGroup;
+      for (var icg = 0; icg < icsPerGroup; icg++) {
+        final ic = groupIndex * icsPerGroup + icg;
+        final og = ic ~/ icsPerOffsetGroup;
+        for (var outFlat = 0; outFlat < outProd; outFlat++) {
+          if ((outFlat & 1023) == 0) activeOnnxControl?.checkpoint();
+          final outCoords = _unflatten(outFlat, outSpatial);
+          var acc = 0.0;
+          for (var k = 0; k < kernelProd; k++) {
+            final kCoords = _unflatten(k, kernel);
+            for (var d = 0; d < rank; d++) {
+              final offBase =
+                  ((batch * offsetGroup + og) * kernelProd + k) * rank + d;
+              point[d] =
+                  outCoords[d] * stride[d] -
+                  pad[d] +
+                  kCoords[d] * dilation[d] +
+                  offset.getD(offBase * outProd + outFlat);
+            }
+            var modulation = 1.0;
+            if (mask != null) {
+              final maskBase =
+                  ((batch * offsetGroup + og) * kernelProd + k) * outProd +
+                  outFlat;
+              modulation = mask.getD(maskBase);
+            }
+            final sampled = _sampleMultilinear(x, batch, ic, point, spatial);
+            final w = weight.getD((oc * icsPerGroup + icg) * kernelProd + k);
+            acc += sampled * w * modulation;
+          }
+          out[(batch * outChannels + oc) * outProd + outFlat] += acc;
+        }
+      }
+      if (bias != null) {
+        final b = bias.getD(oc);
+        for (var outFlat = 0; outFlat < outProd; outFlat++) {
+          out[(batch * outChannels + oc) * outProd + outFlat] += b;
+        }
+      }
+    }
+  }
+  return Tensor.float(Float32List.fromList(out), [
+    n,
+    outChannels,
+    ...outSpatial,
+  ]);
+}
+
+List<Tensor> opCausalConvWithState(
+  Tensor input,
+  Tensor weight, {
+  Tensor? bias,
+  Tensor? pastState,
+  String activation = 'none',
+}) {
+  if (input.rank != 3 || weight.rank != 3) {
+    throw ArgumentError(
+      'CausalConvWithState: expected rank-3 input and weight',
+    );
+  }
+  final b = input.shape[0], c = input.shape[1], length = input.shape[2];
+  final kernelSize = weight.shape[2];
+  final stateLength = kernelSize - 1;
+  final paddedLen = stateLength + length;
+  final padded = List<double>.filled(b * c * paddedLen, 0);
+  if (pastState != null) {
+    if (pastState.shape[0] != b ||
+        pastState.shape[1] != c ||
+        pastState.shape[2] != stateLength) {
+      throw ArgumentError('CausalConvWithState: invalid past state shape');
+    }
+    for (var i = 0; i < b * c * stateLength; i++) {
+      padded[i] = pastState.getD(i);
+    }
+  }
+  for (var i = 0; i < b * c * length; i++) {
+    final bc = i ~/ length;
+    final t = i % length;
+    padded[bc * paddedLen + stateLength + t] = input.getD(i);
+  }
+  final out = List<double>.filled(b * c * length, 0);
+  for (var bc = 0; bc < b * c; bc++) {
+    final channel = bc % c;
+    final biasValue = bias == null ? 0.0 : bias.getD(channel);
+    for (var t = 0; t < length; t++) {
+      var acc = biasValue;
+      for (var k = 0; k < kernelSize; k++) {
+        acc +=
+            weight.getD(channel * kernelSize + k) *
+            padded[bc * paddedLen + t + k];
+      }
+      if (activation == 'silu' || activation == 'swish') {
+        acc = acc / (1 + math.exp(-acc));
+      }
+      out[bc * length + t] = acc;
+    }
+  }
+  final present = List<double>.filled(b * c * stateLength, 0);
+  for (var bc = 0; bc < b * c; bc++) {
+    for (var i = 0; i < stateLength; i++) {
+      present[bc * stateLength + i] = padded[bc * paddedLen + length + i];
+    }
+  }
+  return [
+    Tensor.float(Float32List.fromList(out), [b, c, length]),
+    Tensor.float(Float32List.fromList(present), [b, c, stateLength]),
+  ];
+}
+
+List<Tensor> opLinearAttention(
+  Tensor query,
+  Tensor key,
+  Tensor value, {
+  Tensor? pastState,
+  Tensor? decay,
+  Tensor? beta,
+  String updateRule = 'gated_delta',
+  double scale = 0.0,
+  required int kvNumHeads,
+  required int qNumHeads,
+}) {
+  if (query.rank != 3 || key.rank != 3 || value.rank != 3) {
+    throw ArgumentError('LinearAttention: query, key and value must be rank 3');
+  }
+  if (qNumHeads <= 0 || kvNumHeads <= 0 || qNumHeads % kvNumHeads != 0) {
+    throw ArgumentError('LinearAttention: invalid head counts');
+  }
+  final gating = updateRule == 'gated' || updateRule == 'gated_delta';
+  final delta = updateRule == 'delta' || updateRule == 'gated_delta';
+  if (!const {'linear', 'gated', 'delta', 'gated_delta'}.contains(updateRule)) {
+    throw ArgumentError('LinearAttention: unsupported update_rule $updateRule');
+  }
+  final b = query.shape[0], t = query.shape[1];
+  final dk = query.shape[2] ~/ qNumHeads;
+  final dv = value.shape[2] ~/ kvNumHeads;
+  final groupSize = qNumHeads ~/ kvNumHeads;
+  if (query.shape[2] != qNumHeads * dk ||
+      key.shape[2] != kvNumHeads * dk ||
+      value.shape[2] != kvNumHeads * dv) {
+    throw ArgumentError('LinearAttention: head dimension mismatch');
+  }
+  final state = List<double>.filled(b * kvNumHeads * dk * dv, 0);
+  if (pastState != null) {
+    if (pastState.shape.length != 4 ||
+        pastState.shape[0] != b ||
+        pastState.shape[1] != kvNumHeads ||
+        pastState.shape[2] != dk ||
+        pastState.shape[3] != dv) {
+      throw ArgumentError('LinearAttention: invalid past state shape');
+    }
+    for (var i = 0; i < state.length; i++) {
+      state[i] = pastState.getD(i);
+    }
+  }
+  final output = List<double>.filled(b * qNumHeads * t * dv, 0);
+  final scaleValue = scale == 0.0 ? 1 / math.sqrt(dk) : scale;
+  final vEff = List<double>.filled(dv, 0);
+  final decayStride = decay == null
+      ? 0
+      : (decay.shape[2] == kvNumHeads ? 1 : dk);
+  for (var bi = 0; bi < b; bi++) {
+    for (var ti = 0; ti < t; ti++) {
+      for (var kh = 0; kh < kvNumHeads; kh++) {
+        final stateBase = ((bi * kvNumHeads + kh) * dk) * dv;
+        final qStride = qNumHeads * dk;
+        final kvStride = kvNumHeads * dk;
+        final vStride = kvNumHeads * dv;
+        if (gating) {
+          for (var d = 0; d < dk; d++) {
+            final di = decayStride == 1 ? 0 : d;
+            final g = decay!.getD(
+              (bi * t + ti) * decay.shape[2] + kh * decayStride + di,
+            );
+            final factor = math.exp(g);
+            for (var m = 0; m < dv; m++) {
+              state[stateBase + d * dv + m] *= factor;
+            }
+          }
+        }
+        if (delta) {
+          final betaScale = beta!.shape[2] == 1
+              ? beta.getD(bi * t + ti)
+              : beta.getD((bi * t + ti) * beta.shape[2] + kh);
+          for (var m = 0; m < dv; m++) {
+            var retrieved = 0.0;
+            for (var d = 0; d < dk; d++) {
+              final k = key.getD((bi * t + ti) * kvStride + kh * dk + d);
+              retrieved += state[stateBase + d * dv + m] * k;
+            }
+            final v = value.getD((bi * t + ti) * vStride + kh * dv + m);
+            vEff[m] = betaScale * (v - retrieved);
+          }
+        } else {
+          for (var m = 0; m < dv; m++) {
+            vEff[m] = value.getD((bi * t + ti) * vStride + kh * dv + m);
+          }
+        }
+        for (var d = 0; d < dk; d++) {
+          final k = key.getD((bi * t + ti) * kvStride + kh * dk + d);
+          for (var m = 0; m < dv; m++) {
+            state[stateBase + d * dv + m] += k * vEff[m];
+          }
+        }
+        for (var qi = 0; qi < groupSize; qi++) {
+          final qh = kh * groupSize + qi;
+          for (var m = 0; m < dv; m++) {
+            var acc = 0.0;
+            for (var d = 0; d < dk; d++) {
+              final q = query.getD((bi * t + ti) * qStride + qh * dk + d);
+              acc += q * state[stateBase + d * dv + m];
+            }
+            output[((bi * t + ti) * qNumHeads + qh) * dv + m] =
+                acc * scaleValue;
+          }
+        }
+      }
+    }
+  }
+  return [
+    Tensor.float(Float32List.fromList(output), [b, t, qNumHeads * dv]),
+    Tensor.float(Float32List.fromList(state), [b, kvNumHeads, dk, dv]),
+  ];
+}
+
+Tensor opTfIdfVectorizer(
+  Tensor x, {
+  required List<int> poolInt64s,
+  required List<int> ngramCounts,
+  required List<int> ngramIndexes,
+  required int minGramLength,
+  required int maxGramLength,
+  required int maxSkipCount,
+  required String mode,
+  List<double>? weights,
+}) {
+  if (poolInt64s.isEmpty) {
+    throw ArgumentError('TfIdfVectorizer: only pool_int64s is supported');
+  }
+  if (mode != 'TF' && mode != 'IDF' && mode != 'TFIDF') {
+    throw ArgumentError('TfIdfVectorizer: unsupported mode $mode');
+  }
+  if (x.rank > 2) {
+    throw ArgumentError('TfIdfVectorizer: input must be rank 1 or 2');
+  }
+  final outputSize = ngramIndexes.reduce(math.max) + 1;
+  final grams = <String, int>{};
+  final prefixes = <String>{};
+  var ngramId = 0;
+  for (var size = 1; size <= ngramCounts.length; size++) {
+    final start = ngramCounts[size - 1];
+    final end = size < ngramCounts.length
+        ? ngramCounts[size]
+        : poolInt64s.length;
+    final count = (end - start) ~/ size;
+    final included = size >= minGramLength && size <= maxGramLength;
+    for (var g = 0; g < count; g++) {
+      final base = start + g * size;
+      final key = [
+        for (var i = 0; i < size; i++) poolInt64s[base + i].toString(),
+      ].join(',');
+      for (var p = 1; p <= size; p++) {
+        prefixes.add(
+          [for (var i = 0; i < p; i++) poolInt64s[base + i].toString()]
+              .join(','),
+        );
+      }
+      if (included) {
+        grams[key] = ngramIndexes[ngramId];
+        ngramId++;
+      } else {
+        ngramId++;
+      }
+    }
+  }
+  final rows = x.rank == 2 ? x.shape[0] : 1;
+  final rowSize = x.rank == 2 ? x.shape[1] : x.length;
+  final frequencies = List<int>.filled(rows * outputSize, 0);
+  for (var row = 0; row < rows; row++) {
+    var startSize = minGramLength;
+    for (var skip = 1; skip <= maxSkipCount + 1; skip++) {
+      for (var start = 0; start < rowSize; start++) {
+        final keyParts = <String>[];
+        for (var pos = start; pos < rowSize; pos += skip) {
+          keyParts.add(x.getI(row * rowSize + pos).toString());
+          final size = keyParts.length;
+          if (size < startSize) continue;
+          if (size > maxGramLength) break;
+          final key = keyParts.join(',');
+          if (!prefixes.contains(key)) break;
+          final idx = grams[key];
+          if (idx != null) {
+            frequencies[row * outputSize + idx]++;
+          }
+        }
+      }
+      if (startSize == 1) {
+        startSize = 2;
+        if (startSize > maxGramLength) break;
+      }
+    }
+  }
+  final out = Float32List(frequencies.length);
+  for (var i = 0; i < frequencies.length; i++) {
+    final count = frequencies[i];
+    if (mode == 'TF') {
+      out[i] = count.toDouble();
+    } else if (mode == 'IDF') {
+      if (weights != null && weights.isNotEmpty) {
+        out[i] = count > 0 ? weights[i % outputSize] : 0;
+      } else {
+        out[i] = count > 0 ? 1 : 0;
+      }
+    } else {
+      out[i] = weights != null && weights.isNotEmpty
+          ? weights[i % outputSize] * count
+          : count.toDouble();
+    }
+  }
+  return Tensor.float(out, x.rank <= 1 ? [outputSize] : [rows, outputSize]);
+}
+
+StringTensor opStringConcat(Tensor x, Tensor y) {
+  if (x is! StringTensor || y is! StringTensor) {
+    throw ArgumentError('StringConcat: inputs must be string tensors');
+  }
+  final outShape = _broadcastShape(x.shape, y.shape);
+  final n = outShape.fold<int>(1, (a, b) => a * b);
+  final coords = List<int>.filled(outShape.length, 0);
+  final out = List<String>.filled(n, '');
+  for (int idx = 0; idx < n; idx++) {
+    final xi = _flattenBroadcast(coords, x.shape);
+    final yi = _flattenBroadcast(coords, y.shape);
+    out[idx] = x.strings[xi] + y.strings[yi];
+    for (int k = outShape.length - 1; k >= 0; k--) {
+      if (++coords[k] < outShape[k]) break;
+      coords[k] = 0;
+    }
+  }
+  return StringTensor(out, outShape);
+}
+
+List<String> _splitString(String value, String? delimiter, int? maxsplit) {
+  if (delimiter == null || delimiter.isEmpty) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return [];
+    final limit = maxsplit ?? -1;
+    final result = <String>[];
+    int start = 0;
+    while (start < trimmed.length && (limit < 0 || result.length < limit)) {
+      int end = start;
+      while (end < trimmed.length && !_isWhitespace(trimmed.codeUnitAt(end))) {
+        end++;
+      }
+      result.add(trimmed.substring(start, end));
+      while (end < trimmed.length && _isWhitespace(trimmed.codeUnitAt(end))) {
+        end++;
+      }
+      start = end;
+    }
+    if (start < trimmed.length) result.add(trimmed.substring(start));
+    return result;
+  }
+  final result = <String>[];
+  int start = 0;
+  int splits = 0;
+  while (maxsplit == null || splits < maxsplit) {
+    final at = value.indexOf(delimiter, start);
+    if (at < 0) break;
+    result.add(value.substring(start, at));
+    start = at + delimiter.length;
+    splits++;
+  }
+  result.add(value.substring(start));
+  return result;
+}
+
+bool _isWhitespace(int c) =>
+    c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0B || c == 0x0C || c == 0x0D;
+
+(StringTensor, Tensor) opStringSplit(
+  StringTensor x, {
+  String? delimiter,
+  int? maxsplit,
+}) {
+  final groups = [
+    for (final value in x.strings) _splitString(value, delimiter, maxsplit),
+  ];
+  var width = 0;
+  for (final group in groups) {
+    if (group.length > width) width = group.length;
+  }
+  final out = <String>[];
+  for (final group in groups) {
+    out.addAll(group);
+    for (int k = group.length; k < width; k++) {
+      out.add('');
+    }
+  }
+  final lengths = Int64List.fromList([
+    for (final group in groups) group.length,
+  ]);
+  return (
+    StringTensor(out, [...x.shape, width]),
+    Tensor.int64(lengths, x.shape),
+  );
+}
+
+const Map<int, String> _accentFolds = {
+  0xC0: 'A',
+  0xC1: 'A',
+  0xC2: 'A',
+  0xC3: 'A',
+  0xC4: 'A',
+  0xC5: 'A',
+  0xC7: 'C',
+  0xC8: 'E',
+  0xC9: 'E',
+  0xCA: 'E',
+  0xCB: 'E',
+  0xCC: 'I',
+  0xCD: 'I',
+  0xCE: 'I',
+  0xCF: 'I',
+  0xD1: 'N',
+  0xD2: 'O',
+  0xD3: 'O',
+  0xD4: 'O',
+  0xD5: 'O',
+  0xD6: 'O',
+  0xD9: 'U',
+  0xDA: 'U',
+  0xDB: 'U',
+  0xDC: 'U',
+  0xDD: 'Y',
+  0xE0: 'a',
+  0xE1: 'a',
+  0xE2: 'a',
+  0xE3: 'a',
+  0xE4: 'a',
+  0xE5: 'a',
+  0xE7: 'c',
+  0xE8: 'e',
+  0xE9: 'e',
+  0xEA: 'e',
+  0xEB: 'e',
+  0xEC: 'i',
+  0xED: 'i',
+  0xEE: 'i',
+  0xEF: 'i',
+  0xF1: 'n',
+  0xF2: 'o',
+  0xF3: 'o',
+  0xF4: 'o',
+  0xF5: 'o',
+  0xF6: 'o',
+  0xF9: 'u',
+  0xFA: 'u',
+  0xFB: 'u',
+  0xFC: 'u',
+  0xFD: 'y',
+  0xFF: 'y',
+};
+
+String _stripAccents(String value) {
+  final out = StringBuffer();
+  for (final unit in value.codeUnits) {
+    out.write(_accentFolds[unit] ?? String.fromCharCode(unit));
+  }
+  return out.toString();
+}
+
+StringTensor opStringNormalizer(
+  StringTensor x, {
+  String caseChangeAction = 'NONE',
+  bool isCaseSensitive = false,
+  List<String> stopwords = const [],
+}) {
+  if (x.rank != 1 && x.rank != 2) {
+    throw ArgumentError('StringNormalizer: input must be rank 1 or 2');
+  }
+  if (caseChangeAction != 'NONE' &&
+      caseChangeAction != 'LOWER' &&
+      caseChangeAction != 'UPPER') {
+    throw ArgumentError(
+      'StringNormalizer: invalid case_change_action $caseChangeAction',
+    );
+  }
+  final rawStops = stopwords.toSet();
+  final stops = caseChangeAction == 'LOWER'
+      ? {for (final word in stopwords) word.toLowerCase()}
+      : caseChangeAction == 'UPPER'
+      ? {for (final word in stopwords) word.toUpperCase()}
+      : rawStops;
+  final cleaned = <String>[];
+  for (final original in x.strings) {
+    var value = _stripAccents(original);
+    if (isCaseSensitive && rawStops.isNotEmpty) {
+      value = value
+          .split(' ')
+          .where((word) => !rawStops.contains(word))
+          .join(' ');
+    }
+    if (caseChangeAction == 'LOWER') {
+      value = value.toLowerCase();
+    } else if (caseChangeAction == 'UPPER') {
+      value = value.toUpperCase();
+    }
+    if (!isCaseSensitive && stops.isNotEmpty) {
+      value = value.split(' ').where((word) => !stops.contains(word)).join(' ');
+    }
+    cleaned.add(value);
+  }
+  if (x.rank == 1) {
+    final out = cleaned.where((value) => value.isNotEmpty).toList();
+    return StringTensor(out.isEmpty ? [''] : out, [
+      out.isEmpty ? 1 : out.length,
+    ]);
+  }
+  if (x.shape[0] == 1) {
+    final out = cleaned.where((value) => value.isNotEmpty).toList();
+    return StringTensor(out.isEmpty ? [''] : out, [
+      1,
+      out.isEmpty ? 1 : out.length,
+    ]);
+  }
+  return StringTensor(cleaned, x.shape);
+}
+
+Tensor opRegexFullMatch(StringTensor x, String pattern) {
+  final RegExp regex;
+  try {
+    regex = RegExp('^(?:$pattern)\$');
+  } on FormatException catch (e) {
+    throw ArgumentError('Invalid regex pattern $pattern: $e');
+  }
+  final out = Int64List(x.length);
+  for (var i = 0; i < x.length; i++) {
+    final match = regex.firstMatch(x.strings[i]);
+    out[i] =
+        match != null && match.start == 0 && match.end == x.strings[i].length
+        ? 1
+        : 0;
+  }
+  return Tensor.int64(out, x.shape);
+}
+
+SequenceTensor opSequenceConstruct(List<Tensor> items) =>
+    SequenceTensor(List<Tensor>.of(items));
+
+Tensor opSequenceAt(SequenceTensor sequence, Tensor position) {
+  if (position.length != 1) {
+    throw ArgumentError('SequenceAt: position must be a scalar');
+  }
+  final n = sequence.items.length;
+  var at = position.getI(0);
+  if (at < 0) at += n;
+  if (at < 0 || at >= n) throw RangeError('SequenceAt: position out of range');
+  return sequence.items[at];
+}
+
+SequenceTensor opSequenceErase(SequenceTensor sequence, Tensor? position) {
+  final items = List<Tensor>.of(sequence.items);
+  if (items.isEmpty) throw RangeError('SequenceErase: empty sequence');
+  if (position == null) {
+    items.removeLast();
+    return SequenceTensor(items);
+  }
+  if (position.length != 1) {
+    throw ArgumentError('SequenceErase: position must be a scalar');
+  }
+  var at = position.getI(0);
+  if (at < 0) at += items.length;
+  if (at < 0 || at >= items.length) {
+    throw RangeError('SequenceErase: position out of range');
+  }
+  items.removeAt(at);
+  return SequenceTensor(items);
+}
+
+SequenceTensor opSequenceInsert(
+  SequenceTensor sequence,
+  Tensor value,
+  Tensor? position,
+) {
+  final items = List<Tensor>.of(sequence.items);
+  var at = items.length;
+  if (position != null) {
+    if (position.length != 1) {
+      throw ArgumentError('SequenceInsert: position must be a scalar');
+    }
+    at = position.getI(0);
+    if (at < 0) at += items.length;
+    if (at < 0 || at > items.length) {
+      throw RangeError('SequenceInsert: position out of range');
+    }
+  }
+  items.insert(at, value);
+  return SequenceTensor(items);
+}
+
+Tensor opSequenceLength(SequenceTensor sequence) =>
+    Tensor.scalarInt(sequence.items.length);
+
+Tensor opConcatFromSequence(
+  SequenceTensor sequence, {
+  int? axis,
+  bool newAxis = false,
+}) {
+  if (sequence.items.isEmpty) {
+    throw ArgumentError('ConcatFromSequence: empty sequence');
+  }
+  if (axis == null) {
+    throw ArgumentError('ConcatFromSequence: axis is required');
+  }
+  final items = sequence.items;
+  if (!newAxis) return opConcat(items, axis);
+  final rank = items.first.rank;
+  var ax = axis;
+  if (ax < 0) ax += rank + 1;
+  if (ax < 0 || ax > rank) {
+    throw RangeError('ConcatFromSequence: axis out of range');
+  }
+  final expanded = <Tensor>[];
+  for (final item in items) {
+    if (item.shape.length != rank) {
+      throw ArgumentError('ConcatFromSequence: input ranks differ');
+    }
+    for (var k = 0; k < rank; k++) {
+      if (item.shape[k] != items.first.shape[k]) {
+        throw ArgumentError('ConcatFromSequence: input shapes differ');
+      }
+    }
+    final shape = List<int>.of(item.shape)..insert(ax, 1);
+    expanded.add(item.reshape(shape));
+  }
+  return opConcat(expanded, ax);
+}
+
+SequenceTensor opSplitToSequence(
+  Tensor x, {
+  Tensor? split,
+  int axis = 0,
+  bool keepdims = true,
+}) {
+  final rank = x.rank;
+  var ax = axis;
+  if (ax < 0) ax += rank;
+  if (ax < 0 || ax >= rank) {
+    throw RangeError('SplitToSequence: axis out of range');
+  }
+  final dim = x.shape[ax];
+  final sizes = <int>[];
+  var explicitSizes = false;
+  if (split == null) {
+    sizes.addAll(List<int>.filled(dim, 1));
+  } else if (split.rank == 0) {
+    final chunk = split.getI(0);
+    if (chunk <= 0) throw ArgumentError('SplitToSequence: split must be > 0');
+    explicitSizes = true;
+    for (var start = 0; start < dim; start += chunk) {
+      sizes.add(math.min(chunk, dim - start));
+    }
+  } else {
+    explicitSizes = true;
+    sizes.addAll(split.asIntList());
+    if (sizes.any((size) => size <= 0) ||
+        sizes.fold<int>(0, (a, b) => a + b) != dim) {
+      throw ArgumentError('SplitToSequence: split sizes do not match input');
+    }
+  }
+  final result = <Tensor>[];
+  var start = 0;
+  for (final size in sizes) {
+    var part = opSlice(x, [start], [start + size], [ax], null);
+    if (!explicitSizes && !keepdims) {
+      final shape = List<int>.of(part.shape)..removeAt(ax);
+      part = part.reshape(shape);
+    }
+    result.add(part);
+    start += size;
+  }
+  return SequenceTensor(result);
+}
+
+OptionalTensor opOptional(Tensor? value) => OptionalTensor(value);
+
+Tensor opOptionalGetElement(Tensor? value) {
+  if (value is OptionalTensor) {
+    final element = value.value;
+    if (element == null) {
+      throw StateError('OptionalGetElement: optional has no element');
+    }
+    return element;
+  }
+  if (value == null) {
+    throw StateError('OptionalGetElement: optional input is absent');
+  }
+  return value;
+}
+
+Tensor opOptionalHasElement(Tensor? value) => Tensor.scalarInt(
+  value == null || (value is OptionalTensor && !value.hasElement) ? 0 : 1,
+);

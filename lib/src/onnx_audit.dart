@@ -43,10 +43,10 @@ class OnnxCompatibilityIssue {
   final bool isError;
   const OnnxCompatibilityIssue(this.path, this.message, {this.isError = true});
   Map<String, Object> toJson() => {
-        'path': path,
-        'message': message,
-        'severity': isError ? 'error' : 'warning',
-      };
+    'path': path,
+    'message': message,
+    'severity': isError ? 'error' : 'warning',
+  };
   @override
   String toString() => '${isError ? 'error' : 'warning'}: $path: $message';
 }
@@ -77,13 +77,13 @@ class OnnxCompatibilityReport {
   }
 
   Map<String, Object> toJson() => {
-        'hasErrors': hasErrors,
-        'issues': issues.map((i) => i.toJson()).toList(),
-        'operators': operators,
-        'initializerBytes': initializerBytes,
-        'externalTensorCount': externalTensorCount,
-        'deferredInitializerBytes': deferredInitializerBytes,
-      };
+    'hasErrors': hasErrors,
+    'issues': issues.map((i) => i.toJson()).toList(),
+    'operators': operators,
+    'initializerBytes': initializerBytes,
+    'externalTensorCount': externalTensorCount,
+    'deferredInitializerBytes': deferredInitializerBytes,
+  };
 }
 
 /// Inspect a serialized model. The protobuf bytes are already resident; this
@@ -125,6 +125,7 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
     3: 1,
     6: 8,
     7: 8,
+    8: 1,
     9: 8,
     10: 4,
     11: 4,
@@ -169,18 +170,28 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
   void graph(GraphProto g, String path, Map<String, int> outerTypes) {
     final types = Map<String, int>.of(outerTypes);
     final shapes = <String, List<int>>{};
-    for (final vi in [...g.input, ...g.output, ...g.valueInfo]) {
-      if (vi.hasType() && !vi.type.hasTensorType()) {
-        issue('$path/${vi.name}', 'Only tensor values are supported');
+    void checkValueType(TypeProto t, String name) {
+      if (t.hasTensorType()) {
+        dtype(t.tensorType.elemType, name);
+      } else if (t.hasSequenceType()) {
+        checkValueType(t.sequenceType.elemType, name);
+      } else if (t.hasOptionalType()) {
+        checkValueType(t.optionalType.elemType, name);
+      } else {
+        issue(name, 'Only tensor, sequence and optional values are supported');
       }
+    }
+
+    for (final vi in [...g.input, ...g.output, ...g.valueInfo]) {
+      if (vi.hasType()) checkValueType(vi.type, '$path/${vi.name}');
+      if (!vi.type.hasTensorType()) continue;
       final type = vi.type.tensorType.elemType;
       if (vi.type.tensorType.hasShape()) {
         shapes[vi.name] = [
           for (final d in vi.type.tensorType.shape.dim)
-            d.hasDimValue() ? d.dimValue.toInt() : -1
+            d.hasDimValue() ? d.dimValue.toInt() : -1,
         ];
       }
-      dtype(type, '$path/${vi.name}');
       if (type != 0) types[vi.name] = type;
     }
     for (final t in g.initializer) {
@@ -202,7 +213,8 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
         ifAbsent: () => 1,
       );
       final schema = resolveOnnxSchema(domain, node.opType, version);
-      if (node.overload.isNotEmpty) issue(np, 'Function overloads are unsupported');
+      if (node.overload.isNotEmpty)
+        issue(np, 'Function overloads are unsupported');
       if (version == 0) issue(np, 'Domain has no opset import');
       if (schema == null || node.opType.startsWith('_')) {
         issue(np, 'Operator/domain/opset is not implemented');
@@ -233,8 +245,10 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
               _ => null,
             };
             if (value == null || jsonEncode(value) != jsonEncode(spec[2])) {
-              issue(np,
-                  'Attribute "${a.name}" is defined by ONNX but this kernel does not implement the requested value');
+              issue(
+                np,
+                'Attribute "${a.name}" is defined by ONNX but this kernel does not implement the requested value',
+              );
             }
           }
         }
@@ -263,12 +277,13 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
           3: 'int8',
           6: 'int32',
           7: 'int64',
+          8: 'string',
           9: 'bool',
           10: 'float16',
           11: 'double',
           16: 'bfloat16',
           21: 'uint4',
-          22: 'int4'
+          22: 'int4',
         };
         final parameters = schema['inputTypes'] as List;
         for (var i = 0; i < node.input.length; i++) {
@@ -322,7 +337,8 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
         if (node.opType != 'RMSNormalization' &&
             x != null &&
             x.length != 3 &&
-            x.length != 4) issue(np, 'Input rank must be 3 or 4');
+            x.length != 4)
+          issue(np, 'Input rank must be 3 or 4');
         if (node.opType == 'RotaryEmbedding') {
           final dim = attrInt('rotary_embedding_dim', 0);
           if (dim < 0 || dim.isOdd)
@@ -364,9 +380,11 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
           }
         }
         for (final name in node.output.where((s) => s.isNotEmpty)) {
-          if (types[name] != null && !const {1,10}.contains(types[name]))
-            issue(np,
-                'Output "$name" requires unsupported precision ${types[name]}');
+          if (types[name] != null && !const {1, 10}.contains(types[name]))
+            issue(
+              np,
+              'Output "$name" requires unsupported precision ${types[name]}',
+            );
         }
         // Tensor storage currently widens fp16 and double. Do not silently
         // advertise precision semantics that these standard kernels cannot honor.
@@ -384,8 +402,8 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
           } else if (!(isPosition
               ? type == 7
               : isMask
-                  ? type == 1 || type == 9 || type == 10
-                  : type == 1 || type == 10)) {
+              ? type == 1 || type == 9 || type == 10
+              : type == 1 || type == 10)) {
             issue(
               np,
               'Input $i type $type is unsupported by the standard FLOAT kernel',
@@ -394,7 +412,10 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
         }
         if (node.opType == 'Attention') {
           if (version != 23 && version != 24 && version != 25) {
-            issue(np, 'Attention currently implements opsets 23, 24 and 25 only');
+            issue(
+              np,
+              'Attention currently implements opsets 23, 24 and 25 only',
+            );
           }
           if (input(6)) issue(np, 'nonpad_kv_seqlen is not yet implemented');
           if (![0, 1].contains(attrInt('softmax_precision', 0))) {
@@ -449,8 +470,13 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
       } else if (node.opType == 'Cast') {
         produced = attrInt('to', 0);
         dtype(produced, np);
-      } else if (const {'Shape', 'Size', 'ArgMax', 'ArgMin', 'NonZero'}
-          .contains(node.opType)) {
+      } else if (const {
+        'Shape',
+        'Size',
+        'ArgMax',
+        'ArgMin',
+        'NonZero',
+      }.contains(node.opType)) {
         produced = 7;
       } else if (const {
         'Equal',
@@ -463,7 +489,7 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
         'Not',
         'Xor',
         'IsNaN',
-        'IsInf'
+        'IsInf',
       }.contains(node.opType)) {
         produced = 9;
       } else if (const {
@@ -487,7 +513,7 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
             'RMSNormalization',
             'RotaryEmbedding',
             'Attention',
-            'MatMulNBits'
+            'MatMulNBits',
           }.contains(node.opType) &&
           node.input.isNotEmpty) {
         produced = types[node.input.first];
@@ -514,8 +540,12 @@ OnnxCompatibilityReport auditOnnxModel(ModelProto model) {
     warning: true,
   );
   final deferred = externalGatherNames(model.graph);
-  final deferredBytes = model.graph.initializer.where((t) => deferred.contains(t.name)).fold(0,
-      (int a, t) => a + t.dims.fold(1, (int n, d) => n * d.toInt()) * 4);
+  final deferredBytes = model.graph.initializer
+      .where((t) => deferred.contains(t.name))
+      .fold(
+        0,
+        (int a, t) => a + t.dims.fold(1, (int n, d) => n * d.toInt()) * 4,
+      );
   return OnnxCompatibilityReport(
     List.unmodifiable(issues),
     Map.unmodifiable(operators),

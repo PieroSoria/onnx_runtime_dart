@@ -23,7 +23,14 @@
 /// project's `onnx.proto3` and are used under Apache-2.0; see `NOTICE.md`.
 library;
 
-export 'src/tensor.dart' show Tensor, DType, TensorSpec;
+export 'src/tensor.dart'
+    show
+        Tensor,
+        DType,
+        TensorSpec,
+        StringTensor,
+        SequenceTensor,
+        OptionalTensor;
 export 'src/bpe_tokenizer.dart' show BpeTokenizer;
 export 'src/wordpiece_tokenizer.dart' show WordPieceTokenizer;
 export 'src/unigram_tokenizer.dart' show UnigramTokenizer;

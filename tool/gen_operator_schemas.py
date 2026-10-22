@@ -10,7 +10,7 @@ import onnx
 from onnxruntime.capi._pybind_state import get_all_operator_schema
 
 root = Path(__file__).resolve().parents[1]
-source = (root / 'lib/src/onnx_graph.dart').read_text()
+source = (root / 'lib/src/onnx_graph.dart').read_text(encoding='utf-8')
 names = set(re.findall(r"case '([^']+)'", source)) - {'then_branch', 'else_branch'}
 names |= {'Attention', 'RMSNormalization'}
 names = {n for n in names if not n.startswith('_')}

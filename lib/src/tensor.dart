@@ -8,6 +8,7 @@
 library;
 
 import 'dart:typed_data' hide Int64List;
+
 import 'int64_storage.dart';
 
 enum DType { float32, int64, uint8, int8 }
@@ -30,13 +31,13 @@ class Tensor {
   final bool cacheView;
 
   Tensor.float(Float32List data, this.shape)
-      : dtype = DType.float32,
-        f = data,
-        i = null,
-        u8 = null,
-        i8 = null,
-        offset = 0,
-        cacheView = false {
+    : dtype = DType.float32,
+      f = data,
+      i = null,
+      u8 = null,
+      i8 = null,
+      offset = 0,
+      cacheView = false {
     _checkLength(data.length);
   }
 
@@ -44,48 +45,59 @@ class Tensor {
   /// persistent KV cache so consecutive decode steps reuse one buffer instead
   /// of copying growing history; [length] follows [shape], not the window.
   Tensor.floatView(Float32List data, this.offset, this.shape)
-      : dtype = DType.float32,
-        f = data,
-        i = null,
-        u8 = null,
-        i8 = null,
-        cacheView = true {
-    assert(offset + length <= data.length,
-        'Tensor.floatView: window ${offset}+$length exceeds $data.length');
+    : dtype = DType.float32,
+      f = data,
+      i = null,
+      u8 = null,
+      i8 = null,
+      cacheView = true {
+    assert(
+      offset + length <= data.length,
+      'Tensor.floatView: window ${offset}+$length exceeds $data.length',
+    );
   }
 
-Tensor.int64(List<int> data, this.shape)
-      : dtype = DType.int64,
-        i = data is Int64List ? data : Int64List.fromList(data),
-        f = null,
-        u8 = null,
-        i8 = null,
-        offset = 0,
-        cacheView = false {
+  Tensor.int64(List<int> data, this.shape)
+    : dtype = DType.int64,
+      i = data is Int64List ? data : Int64List.fromList(data),
+      f = null,
+      u8 = null,
+      i8 = null,
+      offset = 0,
+      cacheView = false {
     _checkLength(data.length);
   }
 
   Tensor.uint8(Uint8List data, this.shape)
-      : dtype = DType.uint8,
-        u8 = data,
-        f = null,
-        i = null,
-        i8 = null,
-        offset = 0,
-        cacheView = false {
+    : dtype = DType.uint8,
+      u8 = data,
+      f = null,
+      i = null,
+      i8 = null,
+      offset = 0,
+      cacheView = false {
     _checkLength(data.length);
   }
 
   Tensor.int8(Int8List data, this.shape)
-      : dtype = DType.int8,
-        i8 = data,
-        f = null,
-        i = null,
-        u8 = null,
-        offset = 0,
-        cacheView = false {
+    : dtype = DType.int8,
+      i8 = data,
+      f = null,
+      i = null,
+      u8 = null,
+      offset = 0,
+      cacheView = false {
     _checkLength(data.length);
   }
+
+  Tensor._opaque(this.shape)
+    : dtype = DType.float32,
+      f = null,
+      i = null,
+      u8 = null,
+      i8 = null,
+      offset = 0,
+      cacheView = false;
 
   factory Tensor.scalarFloat(double v) =>
       Tensor.float(Float32List.fromList([v]), const []);
@@ -99,16 +111,22 @@ Tensor.int64(List<int> data, this.shape)
 
   void _checkLength(int len) {
     final expected = shape.fold<int>(1, (a, b) => a * b);
-    assert(len == expected,
-        'Tensor data length $len != product of shape $shape ($expected)');
+    assert(
+      len == expected,
+      'Tensor data length $len != product of shape $shape ($expected)',
+    );
   }
 
   int get length => shape.fold<int>(1, (a, b) => a * b);
   int get rank => shape.length;
+
   /// Backing storage, shared by reshape/view tensors.
-  ByteBuffer get storageBuffer => f?.buffer ?? i?.buffer ?? u8?.buffer ?? i8!.buffer;
-  Object get storageIdentity => f ?? i ?? u8 ?? i8!;
+  ByteBuffer get storageBuffer =>
+      f?.buffer ?? i?.buffer ?? u8?.buffer ?? i8?.buffer ?? _emptyBuffer;
+  Object get storageIdentity => f ?? i ?? u8 ?? i8 ?? this;
   bool get isFloat => dtype == DType.float32;
+
+  static final ByteBuffer _emptyBuffer = Uint8List(0).buffer;
 
   /// The integer backing store, whichever width it is — `Uint8List`,
   /// `Int8List` and `Int64List` all implement `List<int>`. Use this instead
@@ -187,8 +205,9 @@ Tensor.int64(List<int> data, this.shape)
     }
     final negIdx = resolved.indexOf(-1);
     if (negIdx != -1) {
-      final knownProduct =
-          resolved.where((d) => d != -1).fold<int>(1, (a, b) => a * b);
+      final knownProduct = resolved
+          .where((d) => d != -1)
+          .fold<int>(1, (a, b) => a * b);
       resolved[negIdx] = length ~/ (knownProduct == 0 ? 1 : knownProduct);
     }
     return switch (dtype) {
@@ -201,6 +220,63 @@ Tensor.int64(List<int> data, this.shape)
 
   @override
   String toString() => 'Tensor($dtype, shape=$shape)';
+}
+
+class StringTensor extends Tensor {
+  final List<String> strings;
+
+  StringTensor(this.strings, List<int> shape) : super._opaque(shape) {
+    final expected = shape.fold<int>(1, (a, b) => a * b);
+    if (strings.length != expected) {
+      throw ArgumentError(
+        'StringTensor data length ${strings.length} != product of shape $shape',
+      );
+    }
+  }
+
+  @override
+  bool get isFloat => false;
+
+  @override
+  int get length => strings.length;
+
+  @override
+  Tensor reshape(List<int> newShape) => StringTensor(strings, newShape);
+
+  @override
+  String toString() => 'StringTensor(shape=$shape)';
+}
+
+class SequenceTensor extends Tensor {
+  final List<Tensor> items;
+
+  SequenceTensor(this.items) : super._opaque(const []);
+
+  @override
+  bool get isFloat => false;
+
+  @override
+  int get length => items.length;
+
+  @override
+  String toString() => 'SequenceTensor(length=$length)';
+}
+
+class OptionalTensor extends Tensor {
+  final Tensor? value;
+
+  OptionalTensor(this.value) : super._opaque(const []);
+
+  bool get hasElement => value != null;
+
+  @override
+  bool get isFloat => false;
+
+  @override
+  int get length => value?.length ?? 0;
+
+  @override
+  String toString() => 'OptionalTensor(hasElement=$hasElement)';
 }
 
 /// A graph input/output declaration: its [name], declared [shape] (symbolic

@@ -3,6 +3,7 @@
 /// pass with a name -> Tensor value cache â€” no separate topo-sort needed.
 library;
 
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data' hide Int64List;
 
@@ -1261,6 +1262,8 @@ class OnnxGraphExecutor {
             outs = _runLoop(node, ins, attrs, values, profile);
           case 'Scan':
             outs = _runScan(node, ins, attrs, values, profile);
+          case 'SequenceMap':
+            outs = _runSequenceMap(node, ins, attrs, values, profile);
           default:
             outs = _dispatch(node, ins, attrs);
         }
@@ -1324,6 +1327,36 @@ class OnnxGraphExecutor {
     }
     _execNodes(g.node, values, profile);
     return [for (final o in g.output) values[o.name]!];
+  }
+
+  List<Tensor> _runSequenceMap(
+    NodeProto node,
+    List<Tensor?> ins,
+    _AttrMap attrs,
+    Map<String, Tensor> values,
+    ExecutionProfile? profile,
+  ) {
+    final sequence = ins.isEmpty ? null : ins[0];
+    if (sequence is! SequenceTensor) {
+      throw ArgumentError('SequenceMap: first input must be a sequence');
+    }
+    final body = attrs.getGraph('body')!;
+    final count = sequence.items.length;
+    final results = List.generate(body.output.length, (_) => <Tensor>[]);
+    for (var i = 0; i < count; i++) {
+      final bound = <Tensor?>[
+        for (final input in ins)
+          if (input is SequenceTensor)
+            i < input.items.length ? input.items[i] : null
+          else
+            input,
+      ];
+      final outputs = _execSubgraph(body, values, bound, profile);
+      for (var k = 0; k < results.length; k++) {
+        results[k].add(outputs[k]);
+      }
+    }
+    return [for (final result in results) SequenceTensor(result)];
   }
 
   /// `Scan` â€” inputs `[state_1..state_M, scan_1..scan_N]`; body graph maps
@@ -1518,6 +1551,79 @@ class OnnxGraphExecutor {
     switch (node.opType) {
       case 'Identity':
         return [need(0)];
+      case 'SequenceConstruct':
+        return [
+          ops.opSequenceConstruct([for (final t in ins) t!]),
+        ];
+      case 'SequenceAt':
+        return [ops.opSequenceAt(need(0) as SequenceTensor, need(1))];
+      case 'SequenceEmpty':
+        return [ops.opSequenceConstruct(const [])];
+      case 'SequenceErase':
+        return [
+          ops.opSequenceErase(
+            need(0) as SequenceTensor,
+            ins.length > 1 ? ins[1] : null,
+          ),
+        ];
+      case 'SequenceInsert':
+        return [
+          ops.opSequenceInsert(
+            need(0) as SequenceTensor,
+            need(1),
+            ins.length > 2 ? ins[2] : null,
+          ),
+        ];
+      case 'SequenceLength':
+        return [ops.opSequenceLength(need(0) as SequenceTensor)];
+      case 'ConcatFromSequence':
+        return [
+          ops.opConcatFromSequence(
+            need(0) as SequenceTensor,
+            axis: attrs.getInt('axis'),
+            newAxis: (attrs.getInt('new_axis') ?? 0) != 0,
+          ),
+        ];
+      case 'SplitToSequence':
+        return [
+          ops.opSplitToSequence(
+            need(0),
+            split: ins.length > 1 ? ins[1] : null,
+            axis: attrs.getInt('axis') ?? 0,
+            keepdims: (attrs.getInt('keepdims') ?? 1) != 0,
+          ),
+        ];
+      case 'Optional':
+        return [ops.opOptional(ins.isEmpty ? null : ins[0])];
+      case 'OptionalGetElement':
+        return [ops.opOptionalGetElement(ins.isEmpty ? null : ins[0])];
+      case 'OptionalHasElement':
+        return [ops.opOptionalHasElement(ins.isEmpty ? null : ins[0])];
+      case 'StringConcat':
+        return [ops.opStringConcat(need(0), need(1))];
+      case 'StringSplit':
+        final split = ops.opStringSplit(
+          need(0) as StringTensor,
+          delimiter: attrs.getString('delimiter'),
+          maxsplit: attrs.getInt('maxsplit'),
+        );
+        return [split.$1, split.$2];
+      case 'StringNormalizer':
+        return [
+          ops.opStringNormalizer(
+            need(0) as StringTensor,
+            caseChangeAction: attrs.getString('case_change_action') ?? 'NONE',
+            isCaseSensitive: (attrs.getInt('is_case_sensitive') ?? 0) != 0,
+            stopwords: attrs.getStrings('stopwords') ?? const [],
+          ),
+        ];
+      case 'RegexFullMatch':
+        return [
+          ops.opRegexFullMatch(
+            need(0) as StringTensor,
+            attrs.getString('pattern')!,
+          ),
+        ];
       // --- synthetic fused ops (created by _fusePatterns, never in files) ---
       case '_SliceLastSeq':
         return [_sliceLastSeq(need(0))];
@@ -1749,6 +1855,16 @@ class OnnxGraphExecutor {
         ];
       case 'Cast':
         return [ops.opCast(need(0), attrs.getInt('to')!)];
+      case 'CastLike':
+        return [ops.opCastLike(need(0), need(1))];
+      case 'EyeLike':
+        return [
+          ops.opEyeLike(
+            need(0),
+            k: attrs.getInt('k') ?? 0,
+            dtype: attrs.getInt('dtype'),
+          ),
+        ];
       case 'Shape':
         return [
           ops.opShape(
@@ -1801,6 +1917,178 @@ class OnnxGraphExecutor {
         ];
       case 'Expand':
         return [ops.opExpand(need(0), need(1))];
+      case 'Compress':
+        return [ops.opCompress(need(0), need(1), axis: attrs.getInt('axis'))];
+      case 'ReverseSequence':
+        return [
+          ops.opReverseSequence(
+            need(0),
+            need(1),
+            attrs.getInt('time_axis') ?? 0,
+            attrs.getInt('batch_axis') ?? 1,
+          ),
+        ];
+      case 'DepthToSpace':
+        return [
+          ops.opDepthToSpace(
+            need(0),
+            attrs.getInt('blocksize')!,
+            attrs.getString('mode') ?? 'DCR',
+          ),
+        ];
+      case 'SpaceToDepth':
+        return [ops.opSpaceToDepth(need(0), attrs.getInt('blocksize')!)];
+      case 'AffineGrid':
+        return [
+          ops.opAffineGrid(
+            need(0),
+            need(1),
+            alignCorners: (attrs.getInt('align_corners') ?? 0) != 0,
+          ),
+        ];
+      case 'CenterCropPad':
+        return [ops.opCenterCropPad(need(0), need(1), attrs.getInts('axes'))];
+      case 'Col2Im':
+        return [
+          ops.opCol2Im(
+            need(0),
+            need(1),
+            need(2),
+            strides: attrs.getInts('strides'),
+            dilations: attrs.getInts('dilations'),
+            pads: attrs.getInts('pads'),
+          ),
+        ];
+      case 'DFT':
+        return [
+          ops.opDft(
+            need(0),
+            ins.length > 1 ? ins[1] : null,
+            ins.length > 2 ? ins[2] : null,
+            onesided: (attrs.getInt('onesided') ?? 0) != 0,
+            inverse: (attrs.getInt('inverse') ?? 0) != 0,
+          ),
+        ];
+      case 'MaxRoiPool':
+        return [
+          ops.opMaxRoiPool(
+            need(0),
+            need(1),
+            attrs.getInts('pooled_shape')!,
+            spatialScale: attrs.getFloat('spatial_scale') ?? 1.0,
+          ),
+        ];
+      case 'MaxUnpool':
+        return [
+          ops.opMaxUnpool(
+            need(0),
+            need(1),
+            attrs.getInts('kernel_shape')!,
+            strides: attrs.getInts('strides'),
+            pads: attrs.getInts('pads'),
+            outputShape: ins.length > 2 ? ins[2] : null,
+          ),
+        ];
+      case 'MelWeightMatrix':
+        return [
+          ops.opMelWeightMatrix(
+            need(0),
+            need(1),
+            need(2),
+            need(3),
+            need(4),
+            outputDataType: attrs.getInt('output_datatype') ?? 1,
+          ),
+        ];
+      case 'TensorScatter':
+        return [
+          ops.opTensorScatter(
+            need(0),
+            need(1),
+            writeIndices: ins.length > 2 ? ins[2] : null,
+            axis: attrs.getInt('axis') ?? -2,
+            mode: attrs.getString('mode') ?? 'linear',
+          ),
+        ];
+      case 'DeformConv':
+        return [
+          ops.opDeformConv(
+            need(0),
+            need(1),
+            need(2),
+            bias: ins.length > 3 ? ins[3] : null,
+            mask: ins.length > 4 ? ins[4] : null,
+            group: attrs.getInt('group') ?? 1,
+            offsetGroup: attrs.getInt('offset_group') ?? 1,
+            dilations: attrs.getInts('dilations'),
+            kernelShape: attrs.getInts('kernel_shape'),
+            pads: attrs.getInts('pads'),
+            strides: attrs.getInts('strides'),
+          ),
+        ];
+      case 'CausalConvWithState':
+        return ops.opCausalConvWithState(
+          need(0),
+          need(1),
+          bias: ins.length > 2 ? ins[2] : null,
+          pastState: ins.length > 3 ? ins[3] : null,
+          activation: attrs.getString('activation') ?? 'none',
+        );
+      case 'LinearAttention':
+        return ops.opLinearAttention(
+          need(0),
+          need(1),
+          need(2),
+          pastState: ins.length > 3 ? ins[3] : null,
+          decay: ins.length > 4 ? ins[4] : null,
+          beta: ins.length > 5 ? ins[5] : null,
+          updateRule: attrs.getString('update_rule') ?? 'gated_delta',
+          scale: attrs.getFloat('scale') ?? 0.0,
+          kvNumHeads: attrs.getInt('kv_num_heads')!,
+          qNumHeads: attrs.getInt('q_num_heads')!,
+        );
+      case 'TfIdfVectorizer':
+        return [
+          ops.opTfIdfVectorizer(
+            need(0),
+            poolInt64s: attrs.getInts('pool_int64s') ?? const [],
+            ngramCounts: attrs.getInts('ngram_counts') ?? const [],
+            ngramIndexes: attrs.getInts('ngram_indexes') ?? const [],
+            minGramLength: attrs.getInt('min_gram_length') ?? 1,
+            maxGramLength: attrs.getInt('max_gram_length') ?? 1,
+            maxSkipCount: attrs.getInt('max_skip_count') ?? 0,
+            mode: attrs.getString('mode') ?? 'TF',
+            weights: attrs.getFloats('weights'),
+          ),
+        ];
+      case 'Scatter':
+        return [
+          ops.opScatterElements(
+            need(0),
+            need(1),
+            need(2),
+            attrs.getInt('axis') ?? 0,
+            'none',
+          ),
+        ];
+      case 'ScatterElements':
+        return [
+          ops.opScatterElements(
+            need(0),
+            need(1),
+            need(2),
+            attrs.getInt('axis') ?? 0,
+            attrs.getString('reduction') ?? 'none',
+          ),
+        ];
+      case 'Unique':
+        return ops.opUnique(
+          need(0),
+          axis: attrs.getInt('axis'),
+          sorted: (attrs.getInt('sorted') ?? 1) != 0,
+        );
+      case 'Det':
+        return [ops.opDet(need(0))];
       case 'Slice':
         // Opset 10+ takes starts/ends/axes/steps as inputs; opset 1-9 as
         // attributes (no steps).
@@ -1901,6 +2189,31 @@ class OnnxGraphExecutor {
             attrs.getFloat('seed')?.toInt(),
           ),
         ];
+      case 'RandomUniformLike':
+        return [
+          ops.opRandomUniformLike(
+            need(0),
+            attrs.getFloat('low') ?? 0.0,
+            attrs.getFloat('high') ?? 1.0,
+            attrs.getFloat('seed')?.toInt(),
+          ),
+        ];
+      case 'Bernoulli':
+        return [
+          ops.opBernoulli(
+            need(0),
+            seed: attrs.getFloat('seed')?.toInt(),
+            dtype: attrs.getInt('dtype'),
+          ),
+        ];
+      case 'Multinomial':
+        return [
+          ops.opMultinomial(
+            need(0),
+            attrs.getInt('sample_size') ?? 1,
+            seed: attrs.getFloat('seed')?.toInt(),
+          ),
+        ];
       case 'Range':
         return [ops.opRange(need(0), need(1), need(2))];
       case 'Abs':
@@ -1945,6 +2258,24 @@ class OnnxGraphExecutor {
         return [ops.opAnd(need(0), need(1))];
       case 'Or':
         return [ops.opOr(need(0), need(1))];
+      case 'Xor':
+        return [ops.opXor(need(0), need(1))];
+      case 'BitwiseAnd':
+        return [ops.opBitwiseAnd(need(0), need(1))];
+      case 'BitwiseOr':
+        return [ops.opBitwiseOr(need(0), need(1))];
+      case 'BitwiseXor':
+        return [ops.opBitwiseXor(need(0), need(1))];
+      case 'BitwiseNot':
+        return [ops.opBitwiseNot(need(0))];
+      case 'BitShift':
+        return [
+          ops.opBitShift(
+            need(0),
+            need(1),
+            left: (attrs.getString('direction') ?? 'RIGHT') == 'LEFT',
+          ),
+        ];
       case 'Max':
         return [
           ops.opMax([for (final t in ins) t!]),
@@ -1952,6 +2283,14 @@ class OnnxGraphExecutor {
       case 'Min':
         return [
           ops.opMin([for (final t in ins) t!]),
+        ];
+      case 'Sum':
+        return [
+          ops.opSum([for (final t in ins) t!]),
+        ];
+      case 'Mean':
+        return [
+          ops.opMean([for (final t in ins) t!]),
         ];
       case 'Where':
         return [ops.opWhere(need(0), need(1), need(2))];
@@ -1989,6 +2328,36 @@ class OnnxGraphExecutor {
             (attrs.getInt('keepdims') ?? 1) != 0,
           ),
         ];
+      case 'ReduceL1':
+        return [
+          ops.opReduceL1(
+            need(0),
+            ins.length > 1 && ins[1] != null
+                ? ins[1]!.asIntList()
+                : attrs.getInts('axes'),
+            (attrs.getInt('keepdims') ?? 1) != 0,
+          ),
+        ];
+      case 'ReduceLogSum':
+        return [
+          ops.opReduceLogSum(
+            need(0),
+            ins.length > 1 && ins[1] != null
+                ? ins[1]!.asIntList()
+                : attrs.getInts('axes'),
+            (attrs.getInt('keepdims') ?? 1) != 0,
+          ),
+        ];
+      case 'ReduceLogSumExp':
+        return [
+          ops.opReduceLogSumExp(
+            need(0),
+            ins.length > 1 && ins[1] != null
+                ? ins[1]!.asIntList()
+                : attrs.getInts('axes'),
+            (attrs.getInt('keepdims') ?? 1) != 0,
+          ),
+        ];
       case 'Split':
         // Opset 13+ takes split sizes as an input; opset 11 as an attribute.
         return ops.opSplit(
@@ -2007,6 +2376,16 @@ class OnnxGraphExecutor {
             ins.length > 2 ? ins[2] : null,
             ins.length > 3 && ins[3] != null ? ins[3]!.getI(0) : null,
             onesided: (attrs.getInt('onesided') ?? 1) != 0,
+          ),
+        ];
+      case 'HannWindow':
+      case 'HammingWindow':
+      case 'BlackmanWindow':
+        return [
+          ops.opWindow(
+            node.opType.substring(0, node.opType.length - 6),
+            need(0).getI(0),
+            periodic: (attrs.getInt('periodic') ?? 1) != 0,
           ),
         ];
       case 'ReduceProd':
@@ -2034,6 +2413,15 @@ class OnnxGraphExecutor {
       case 'CumSum':
         return [
           ops.opCumSum(
+            need(0),
+            need(1).getI(0),
+            exclusive: (attrs.getInt('exclusive') ?? 0) != 0,
+            reverse: (attrs.getInt('reverse') ?? 0) != 0,
+          ),
+        ];
+      case 'CumProd':
+        return [
+          ops.opCumProd(
             need(0),
             need(1).getI(0),
             exclusive: (attrs.getInt('exclusive') ?? 0) != 0,
@@ -2150,10 +2538,35 @@ class OnnxGraphExecutor {
             countIncludePad: (attrs.getInt('count_include_pad') ?? 0) != 0,
           ),
         ];
+      case 'LpPool':
+        return [
+          nn.opLpPool(
+            need(0),
+            kernel: attrs.getInts('kernel_shape')!,
+            p: attrs.getInt('p') ?? 2,
+            strides: attrs.getInts('strides'),
+            pads: attrs.getInts('pads'),
+            dilations: attrs.getInts('dilations'),
+            autoPad: attrs.getString('auto_pad') ?? 'NOTSET',
+            ceilMode: (attrs.getInt('ceil_mode') ?? 0) != 0,
+          ),
+        ];
       case 'GlobalAveragePool':
         return [nn.opGlobalPool(need(0), isMax: false)];
       case 'GlobalMaxPool':
         return [nn.opGlobalPool(need(0), isMax: true)];
+      case 'GlobalLpPool':
+        return [nn.opGlobalLpPool(need(0), p: attrs.getInt('p') ?? 2)];
+      case 'LRN':
+        return [
+          nn.opLRN(
+            need(0),
+            size: attrs.getInt('size')!,
+            alpha: attrs.getFloat('alpha') ?? 0.0001,
+            beta: attrs.getFloat('beta') ?? 0.75,
+            bias: attrs.getFloat('bias') ?? 1.0,
+          ),
+        ];
       case 'BatchNormalization':
         return [
           nn.opBatchNormalization(
@@ -2271,6 +2684,25 @@ class OnnxGraphExecutor {
               need(0).shape,
             ),
         ];
+      case 'NegativeLogLikelihoodLoss':
+        return [
+          ops.opNegativeLogLikelihoodLoss(
+            need(0),
+            need(1),
+            ins.length > 2 ? ins[2] : null,
+            reduction: attrs.getString('reduction') ?? 'mean',
+            ignoreIndex: attrs.getInt('ignore_index'),
+          ),
+        ];
+      case 'SoftmaxCrossEntropyLoss':
+        return ops.opSoftmaxCrossEntropyLoss(
+          need(0),
+          need(1),
+          ins.length > 2 ? ins[2] : null,
+          reduction: attrs.getString('reduction') ?? 'mean',
+          ignoreIndex: attrs.getInt('ignore_index'),
+          wantLogProb: node.output.length > 1 && node.output[1].isNotEmpty,
+        );
       case 'LeakyRelu':
         return [ops.opLeakyRelu(need(0), attrs.getFloat('alpha') ?? 0.01)];
       case 'Elu':
@@ -2291,6 +2723,65 @@ class OnnxGraphExecutor {
         return [ops.opSign(need(0))];
       case 'Atan':
         return [ops.opAtan(need(0))];
+      case 'Acos':
+        return [ops.opAcos(need(0))];
+      case 'Acosh':
+        return [ops.opAcosh(need(0))];
+      case 'Asin':
+        return [ops.opAsin(need(0))];
+      case 'Asinh':
+        return [ops.opAsinh(need(0))];
+      case 'Atanh':
+        return [ops.opAtanh(need(0))];
+      case 'Cosh':
+        return [ops.opCosh(need(0))];
+      case 'Sinh':
+        return [ops.opSinh(need(0))];
+      case 'Tan':
+        return [ops.opTan(need(0))];
+      case 'Mish':
+        return [ops.opMish(need(0))];
+      case 'Softsign':
+        return [ops.opSoftsign(need(0))];
+      case 'Celu':
+        return [ops.opCelu(need(0), attrs.getFloat('alpha') ?? 1.0)];
+      case 'Selu':
+        return [
+          ops.opSelu(
+            need(0),
+            attrs.getFloat('alpha') ?? 1.6732631921768188,
+            attrs.getFloat('gamma') ?? 1.0507010221481323,
+          ),
+        ];
+      case 'Shrink':
+        return [
+          ops.opShrink(
+            need(0),
+            attrs.getFloat('lambd') ?? 0.5,
+            attrs.getFloat('bias') ?? 0.0,
+          ),
+        ];
+      case 'Swish':
+        return [ops.opSwish(need(0), attrs.getFloat('alpha') ?? 1.0)];
+      case 'ThresholdedRelu':
+        return [ops.opThresholdedRelu(need(0), attrs.getFloat('alpha') ?? 1.0)];
+      case 'Hardmax':
+        return [ops.opHardmax(need(0), attrs.getInt('axis') ?? -1)];
+      case 'LpNormalization':
+        return [
+          ops.opLpNormalization(
+            need(0),
+            attrs.getInt('axis') ?? -1,
+            attrs.getInt('p') ?? 2,
+          ),
+        ];
+      case 'MeanVarianceNormalization':
+        return [
+          ops.opMeanVarianceNormalization(
+            need(0),
+            attrs.getInts('axes') ?? const [0, 2, 3],
+          ),
+        ];
       case 'Floor':
         return [ops.opFloor(need(0))];
       case 'Ceil':
@@ -2601,15 +3092,26 @@ class _AttrMap {
     this._decodedTensors = const {},
   ]) : _byName = {for (final a in attrs) a.name: a};
 
-  int? getInt(String name) =>
-      _byName.containsKey(name) ? _byName[name]!.i.toInt() : null;
-  double? getFloat(String name) =>
-      _byName.containsKey(name) ? _byName[name]!.f : null;
+  int? getInt(String name) {
+    final attr = _byName[name];
+    if (attr == null || !attr.hasI()) return null;
+    return attr.i.toInt();
+  }
+
+  double? getFloat(String name) {
+    final attr = _byName[name];
+    if (attr == null || !attr.hasF()) return null;
+    return attr.f;
+  }
+
   String? getString(String name) {
     final attr = _byName[name];
     if (attr == null) return null;
-    if (!cacheDecoded) return String.fromCharCodes(attr.s);
-    return _stringCache.putIfAbsent(name, () => String.fromCharCodes(attr.s));
+    if (!cacheDecoded) return utf8.decode(attr.s, allowMalformed: true);
+    return _stringCache.putIfAbsent(
+      name,
+      () => utf8.decode(attr.s, allowMalformed: true),
+    );
   }
 
   List<int>? getInts(String name) {
@@ -2632,13 +3134,11 @@ class _AttrMap {
   List<String>? getStrings(String name) {
     final attr = _byName[name];
     if (attr == null) return null;
-    if (!cacheDecoded) {
-      return attr.strings.map((s) => String.fromCharCodes(s)).toList();
-    }
-    return _stringsCache.putIfAbsent(
-      name,
-      () => attr.strings.map((s) => String.fromCharCodes(s)).toList(),
-    );
+    List<String> decode() => [
+      for (final s in attr.strings) utf8.decode(s, allowMalformed: true),
+    ];
+    if (!cacheDecoded) return decode();
+    return _stringsCache.putIfAbsent(name, decode);
   }
 
   GraphProto? getGraph(String name) =>
@@ -2657,6 +3157,22 @@ class _AttrMap {
     if (_byName.containsKey('value')) {
       return _decodedTensors[_byName['value']!.t] ??
           tensorFromProto(_byName['value']!.t, ext: _ext);
+    }
+    final stringValue = _byName['value_string'];
+    if (stringValue != null) {
+      return StringTensor([
+        utf8.decode(stringValue.s, allowMalformed: true),
+      ], const []);
+    }
+    final stringValues = _byName['value_strings'];
+    if (stringValues != null) {
+      return StringTensor(
+        [
+          for (final value in stringValues.strings)
+            utf8.decode(value, allowMalformed: true),
+        ],
+        [stringValues.strings.length],
+      );
     }
     final ints = _byName['value_ints'];
     if (ints != null) {

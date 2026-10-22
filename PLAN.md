@@ -29,6 +29,11 @@
 > Numbers in `BENCHMARKS.md`;
 > per-op ORT parity fixtures in `test/fixtures/` (`tool/gen_fixtures.py`),
 > live-model parity via `tool/live_parity.py|dart`.
+>
+> **Coverage update (2026-10-22):** 200/202 standard ONNX operator schemas
+> through opset 27 are implemented; only `BitCast` and `ImageDecoder` remain.
+> Sequence, optional and string values are carried by dedicated `Tensor`
+> subclasses.
 
 Two workstreams, independently useful and largely independent to execute:
 

@@ -5,7 +5,9 @@
 /// tensor size.
 library;
 
+import 'dart:convert';
 import 'dart:typed_data' hide Int64List;
+
 import 'int64_storage.dart';
 
 import 'onnx.pb.dart';
@@ -19,6 +21,7 @@ const int _kUint8 = 2;
 const int _kInt8 = 3;
 const int _kInt32 = 6;
 const int _kInt64 = 7;
+const int _kString = 8;
 const int _kBool = 9;
 const int _kFloat16 = 10;
 const int _kDouble = 11;
@@ -77,7 +80,10 @@ int float32ToHalfBits(int f) {
 /// Reads the bytes for an external-data weight: `(location, offset, length)`
 /// from a companion file. See [OnnxModel.fromFile].
 typedef ExternalDataResolver = Uint8List Function(
-    String location, int offset, int length);
+  String location,
+  int offset,
+  int length,
+);
 
 /// The raw little-endian bytes of [t] — either inline `raw_data` or, for
 /// external tensors, resolved from the companion file via [ext].
@@ -88,11 +94,16 @@ typedef ExternalDataResolver = Uint8List Function(
 /// `length: 0` and expect the reader to derive it from the shape, as ORT
 /// does).
 Uint8List _rawBytes(
-    TensorProto t, ExternalDataResolver? ext, int expectedBytes) {
+  TensorProto t,
+  ExternalDataResolver? ext,
+  int expectedBytes,
+) {
   if (t.dataLocation == TensorProto_DataLocation.EXTERNAL) {
     if (ext == null) {
-      throw StateError('"${t.name}" stores its weights externally — load the '
-          'model with OnnxModel.fromFile so the companion data file is found');
+      throw StateError(
+        '"${t.name}" stores its weights externally — load the '
+        'model with OnnxModel.fromFile so the companion data file is found',
+      );
     }
     var location = '';
     var offset = 0;
@@ -137,8 +148,10 @@ int _elementCount(List<int> shape, TensorProto t) {
 /// off the end of the buffer with an opaque RangeError.
 void _needRawLen(TensorProto t, int haveBytes, int n, int elemSize) {
   if (n > haveBytes ~/ elemSize) {
-    throw FormatException('Tensor "${t.name}" raw_data too short: $haveBytes '
-        'bytes for $n elements of $elemSize bytes');
+    throw FormatException(
+      'Tensor "${t.name}" raw_data too short: $haveBytes '
+      'bytes for $n elements of $elemSize bytes',
+    );
   }
 }
 
@@ -148,8 +161,10 @@ void _needRawLen(TensorProto t, int haveBytes, int n, int elemSize) {
 /// declared shape disagree — a silent corruption that detonates downstream.
 void _needInlineLen(TensorProto t, int have, int n) {
   if (have != n) {
-    throw FormatException('Tensor "${t.name}" inline data length $have does '
-        'not match shape product $n');
+    throw FormatException(
+      'Tensor "${t.name}" inline data length $have does '
+      'not match shape product $n',
+    );
   }
 }
 
@@ -157,7 +172,13 @@ Tensor tensorFromProto(TensorProto t, {ExternalDataResolver? ext}) {
   final shape = t.dims.map((d) => d.toInt()).toList();
   final n = _elementCount(shape, t);
 
-  if (t.dataType == _kFloat) {
+  if (t.dataType == _kString) {
+    _needInlineLen(t, t.stringData.length, n);
+    return StringTensor([
+      for (final value in t.stringData)
+        utf8.decode(value, allowMalformed: true),
+    ], shape);
+  } else if (t.dataType == _kFloat) {
     if (t.floatData.isNotEmpty) {
       _needInlineLen(t, t.floatData.length, n);
       return Tensor.float(Float32List.fromList(t.floatData), shape);
@@ -174,8 +195,9 @@ Tensor tensorFromProto(TensorProto t, {ExternalDataResolver? ext}) {
     if (t.int64Data.isNotEmpty) {
       _needInlineLen(t, t.int64Data.length, n);
       return Tensor.int64(
-          Int64List.fromList(t.int64Data.map((v) => v.toInt()).toList()),
-          shape);
+        Int64List.fromList(t.int64Data.map((v) => v.toInt()).toList()),
+        shape,
+      );
     }
     final bytes = _rawBytes(t, ext, n * 8);
     _needRawLen(t, bytes.length, n, 8);
@@ -272,5 +294,6 @@ Tensor tensorFromProto(TensorProto t, {ExternalDataResolver? ext}) {
     return Tensor.int64(out, shape);
   }
   throw UnsupportedError(
-      'Unsupported ONNX TensorProto dataType ${t.dataType} for "${t.name}"');
+    'Unsupported ONNX TensorProto dataType ${t.dataType} for "${t.name}"',
+  );
 }
