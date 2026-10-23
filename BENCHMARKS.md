@@ -29,6 +29,25 @@ Caveat: this machine runs other dev workloads; min-of-15-iters is the robust
 number, means can inflate 2–3× under contention. Rows above marked "quiet
 machine" were measured at load ≈ 4; the earlier rows at load 10–30.
 
+## MiniLM direct-GEMM kernel (Windows, 2026-10-22)
+
+Same model and seq length on the Windows dev box (32 logical cores, `dart run`
+JIT, machine load ~32%). Before/after uses `tool/bench.dart --seq 32`; the
+direct path reads B through a `Float32x4List` view and skips the per-call
+O(k*n) panel pack. Accumulation order is unchanged (bitwise-identical output,
+confirmed against ORT: cosine 1.0, max abs diff 3.6e-6).
+
+| Change | min wall | mean | Top ops |
+|---|---|---|---|
+| packed-panel GEMM (before) | 54.0 ms | 56.8 ms | MatMul 85.0% |
+| direct 4x16 GEMM, no B pack copy | **42.6 ms** | 45.4 ms | MatMul 81.7% |
+| + isolate pool, 4 workers | **21.0 ms** | 26.5 ms | MatMul 58.9% |
+
+The direct kernel is ~21% lower min wall end-to-end (microbenchmarks on the
+same process showed 15-32% lower GEMM time). Native ORT on this box:
+6.2 ms single-thread, 1.7 ms default multi-thread. The Windows box is noisy;
+min-of-20 is the robust number.
+
 ## Maia3-5M chess transformer (batch 1, min of 25, cosine-1.0 throughout)
 
 | Change | min wall |

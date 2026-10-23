@@ -79,6 +79,23 @@ void main() {
       });
     }
 
+    test('$name kernel: honors outStride (banded slabs)', () {
+      const m = 5, k = 7, n = 8, stride = 13;
+      final a = _rand(m * k), b = _rand(k * n);
+      final out = Float32List(m * stride);
+      kern(a, 0, b, 0, out, 0, m, k, n, outStride: stride);
+      final want = _naive(a, b, m, k, n);
+      for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+          expect(out[i * stride + j], closeTo(want[i * n + j], 1e-5),
+              reason: '$name row=$i col=$j');
+        }
+        for (int j = n; j < stride; j++) {
+          expect(out[i * stride + j], 0, reason: '$name padding row=$i col=$j');
+        }
+      }
+    });
+
     test('$name kernel: honors offsets (batched layout)', () {
       // Two batches packed into single buffers; kernel run per batch.
       const m = 5, k = 7, n = 6;
